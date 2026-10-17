@@ -256,10 +256,24 @@ const SOURCES = [
   async isbn => {   // Google Books: best for categories
     const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
     const g = d.items?.[0]?.volumeInfo;
-    return g && { title: [g.title, g.subtitle].filter(Boolean).join(': '), authors: g.authors || [], year: year(g.publishedDate),
-                  cats: (g.categories || []).flatMap(c => c.split('/').map(x => x.trim())).filter(Boolean), subjects: [] };
+    return g && gRec(g);
+  },
+  async isbn => {   // Google Books free-text query: finds editions the isbn: index misses, but only accepted if the ISBN matches
+    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${isbn}&maxResults=5`);
+    const g = (d.items || []).map(i => i.volumeInfo).find(v => (v.industryIdentifiers || []).some(x => x.identifier === isbn));
+    return g && gRec(g);
+  },
+  async isbn => {   // Crossref: strong for university-press and scholarly books
+    const d = await getJson('Crossref', `https://api.crossref.org/works?filter=isbn:${isbn}&rows=1&select=title,subtitle,author,editor,issued,subject`);
+    const c = d.message?.items?.[0];
+    if (!c) return null;
+    const people = (c.author?.length ? c.author : c.editor) || [];
+    return { title: [c.title?.[0], c.subtitle?.[0]].filter(Boolean).join(': '), authors: people.map(a => [a.given, a.family].filter(Boolean).join(' ') || a.name).filter(Boolean),
+             year: c.issued?.['date-parts']?.[0]?.[0], cats: [], subjects: c.subject || [] };
   },
 ];
+const gRec = g => ({ title: [g.title, g.subtitle].filter(Boolean).join(': '), authors: g.authors || [], year: year(g.publishedDate),
+                     cats: (g.categories || []).flatMap(c => c.split('/').map(x => x.trim())).filter(Boolean), subjects: [] });
 
 // Resolves to a book, or null if every source answered and none knows it. Throws if sources failed and nothing was found.
 async function lookup(isbn13) {
@@ -267,7 +281,10 @@ async function lookup(isbn13) {
   const recs = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
   const errs = [...new Set(res.filter(r => r.status === 'rejected').map(r => r.reason.message))];
   if (!recs.length) { if (errs.length) throw new Error(errs.join('; ')); return null; }
+  return merge(isbn13, recs);
+}
 
+function merge(isbn13, recs) {
   const first = f => recs.map(f).find(v => v && String(v).length) || '';
   const cats = recs.flatMap(r => r.cats);
   const tagSet = new Map();
@@ -286,6 +303,20 @@ async function lookup(isbn13) {
     amazon: amazonUrl(isbn13),
     added: new Date().toISOString(),
   };
+}
+
+// Title/author search, for books no ISBN database knows: user picks the right match, the ISBN stays as scanned.
+async function searchTitles(q) {
+  const enc = encodeURIComponent(q);
+  const res = await Promise.allSettled([
+    getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=title,author_name,first_publish_year,subject`)
+      .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [] }))),
+    getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${enc}&maxResults=8&printType=books`)
+      .then(d => (d.items || []).map(i => gRec(i.volumeInfo))),
+  ]);
+  const hits = res.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+  if (!hits.length && res.every(r => r.status === 'rejected')) throw new Error(res[0].reason.message);
+  return hits.map(h => merge('', [h]));
 }
 
 // ---------- UI helpers ----------
@@ -340,12 +371,30 @@ async function openSheet(isbn) {
     <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Open on Amazon ↗</a>
     <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
     <button class="ghost" id="reB" style="width:100%;margin-top:14px">Look up again</button>
+    <label>Not found? Search by title or author</label>
+    <div style="display:flex;gap:8px"><input id="qIn" placeholder="e.g. Barth church dogmatics" enterkeyhint="search"><button id="qGo" style="min-height:48px">Search</button></div>
+    <div id="qRes"></div>
     <div class="btns"><button class="danger" id="delB">Delete</button><button class="grow" id="saveB">Save</button></div>`;
   $('sheetBg').classList.add('on');
   $('saveB').onclick = async () => {
     $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
     await saveBook(b); closeSheet(); render();
   };
+  const fillFrom = f => $('sheet').querySelectorAll('[data-f]').forEach(el => { if (f[el.dataset.f]) el.value = f[el.dataset.f]; });
+  const doSearch = async () => {
+    const q = $('qIn').value.trim(); if (!q) return;
+    $('qRes').innerHTML = '<div class="meta" style="margin-top:8px">Searching…</div>';
+    try {
+      const hits = await searchTitles(q);
+      window._hits = hits;
+      $('qRes').innerHTML = hits.length ? hits.map((h, i) => `<div class="book" data-i="${i}" style="margin-top:8px">
+          <h3>${esc(h.title)}</h3><div class="meta">${esc(h.author)}${h.published ? ' · ' + esc(h.published) : ''}</div></div>`).join('')
+        : '<div class="meta" style="margin-top:8px">No results — fill the fields in by hand.</div>';
+    } catch (e) { $('qRes').innerHTML = `<div class="meta" style="margin-top:8px;color:var(--danger)">${esc(e.message)}</div>`; }
+  };
+  $('qGo').onclick = doSearch;
+  $('qIn').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+  $('qRes').onclick = e => { const c = e.target.closest('[data-i]'); if (!c) return; fillFrom(window._hits[+c.dataset.i]); toast('Filled in — check, then tap Save'); $('sheet').scrollTo({ top: 0, behavior: 'smooth' }); };
   $('reB').onclick = async () => {
     $('reB').textContent = 'Looking up…';
     try {
