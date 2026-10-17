@@ -246,15 +246,15 @@ const year = v => (String(v || '').match(/\d{4}/) || [''])[0];
 
 const SOURCES = [
   async isbn => {   // Open Library search: best for original publication year
-    const d = await getJson('Open Library', `https://openlibrary.org/search.json?q=isbn:${isbn}&fields=title,author_name,first_publish_year,subject&limit=1`);
+    const d = await getJson('Open Library', `https://openlibrary.org/search.json?q=isbn:${isbn}&fields=title,author_name,first_publish_year,subject,ddc&limit=1`);
     const o = d.docs?.[0];
-    return o && { title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [] };
+    return o && { title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc };
   },
   async isbn => {   // Open Library edition data: catches books the search index misses
     const d = await getJson('Open Library', `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&jscmd=data&format=json`);
     const o = d[`ISBN:${isbn}`];
     return o && { title: [o.title, o.subtitle].filter(Boolean).join(': '), authors: (o.authors || []).map(a => a.name), year: year(o.publish_date),
-                  cats: [], subjects: (o.subjects || []).map(x => x.name) };
+                  cats: [], subjects: (o.subjects || []).map(x => x.name), ddc: o.classifications?.dewey_decimal_class };
   },
   async isbn => {   // Google Books: best for categories
     const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1${gKey()}`);
@@ -291,13 +291,37 @@ async function lookup(isbn13) {
   return merge(isbn13, recs);
 }
 
+// Dewey Decimal: main class (hundreds) and division (tens). Used when Google Books gives no categories.
+const DDC_MAIN = { 0:'Computer science, information & general works', 1:'Philosophy & psychology', 2:'Religion', 3:'Social sciences', 4:'Language',
+  5:'Science', 6:'Technology', 7:'Arts & recreation', 8:'Literature', 9:'History & geography' };
+const DDC_DIV = { 0:'General works',10:'Bibliography',20:'Library & information sciences',30:'Encyclopedias',50:'Serials',60:'Organizations & museums',70:'Journalism & publishing',80:'General collections',90:'Manuscripts & rare books',
+  100:'Philosophy',110:'Metaphysics',120:'Epistemology',130:'Parapsychology & occultism',140:'Philosophical schools',150:'Psychology',160:'Logic',170:'Ethics',180:'Ancient, medieval & eastern philosophy',190:'Modern western philosophy',
+  200:'Religion',210:'Philosophy & theory of religion',220:'Bible',230:'Christianity & Christian theology',240:'Christian practice & devotion',250:'Pastoral practice & religious orders',260:'Christian organisation & worship',270:'History of Christianity',280:'Christian denominations',290:'Other religions',
+  300:'Social sciences',310:'Statistics',320:'Political science',330:'Economics',340:'Law',350:'Public administration & military',360:'Social problems & services',370:'Education',380:'Commerce & communications',390:'Customs & folklore',
+  400:'Language',410:'Linguistics',420:'English',430:'German',440:'French',450:'Italian',460:'Spanish & Portuguese',470:'Latin',480:'Classical & modern Greek',490:'Other languages',
+  500:'Science',510:'Mathematics',520:'Astronomy',530:'Physics',540:'Chemistry',550:'Earth sciences',560:'Palaeontology',570:'Biology',580:'Plants',590:'Animals',
+  600:'Technology',610:'Medicine & health',620:'Engineering',630:'Agriculture',640:'Home & family',650:'Management',660:'Chemical engineering',670:'Manufacturing',680:'Specialised manufacturing',690:'Construction',
+  700:'Arts',710:'Landscape & planning',720:'Architecture',730:'Sculpture & ceramics',740:'Drawing & decorative arts',750:'Painting',760:'Graphic arts',770:'Photography',780:'Music',790:'Sports, games & entertainment',
+  800:'Literature',810:'American literature',820:'English literature',830:'German literature',840:'French literature',850:'Italian literature',860:'Spanish & Portuguese literature',870:'Latin literature',880:'Greek literature',890:'Other literatures',
+  900:'History',910:'Geography & travel',920:'Biography',930:'Ancient history',940:'History of Europe',950:'History of Asia',960:'History of Africa',970:'History of North America',980:'History of South America',990:'History of other areas' };
+function ddcCats(list) {
+  const m = (list || []).map(d => String(d).match(/^\d{3}/)).find(Boolean);   // first usable class number, e.g. "230.092" -> 230
+  if (!m) return [];
+  const n = +m[0], main = DDC_MAIN[Math.floor(n / 100)], div = DDC_DIV[Math.floor(n / 10) * 10];
+  return [main, div && div !== main ? div : ''].filter(Boolean);
+}
+// drop Open Library bookkeeping tags such as "series:Harry_Potter", "nyt:...", "Accessible book"
+const JUNK_TAG = /^(accessible book|protected daisy|in library|lending library|overdrive|internet archive wishlist|large type books|open library staff picks|reading level-.*|general)$/i;
+const goodTag = t => !/[:_]/.test(t) && !JUNK_TAG.test(t) && t.length < 60;
+
 function merge(isbn13, recs) {
   const first = f => recs.map(f).find(v => v && String(v).length) || '';
-  const cats = recs.flatMap(r => r.cats);
+  let cats = recs.flatMap(r => r.cats);
+  if (!cats.length) cats = ddcCats(recs.flatMap(r => r.ddc || []));
   const tagSet = new Map();
   [...cats, ...recs.flatMap(r => r.subjects.slice(0, 15))].forEach(t => {
     t = String(t).replace(/;/g, ',').trim();
-    if (t && !tagSet.has(t.toLowerCase())) tagSet.set(t.toLowerCase(), t);
+    if (t && goodTag(t) && !tagSet.has(t.toLowerCase())) tagSet.set(t.toLowerCase(), t);
   });
   return {
     isbn: isbn13,
@@ -316,8 +340,8 @@ function merge(isbn13, recs) {
 async function searchTitles(q) {
   const enc = encodeURIComponent(q);
   const res = await Promise.allSettled([
-    getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=title,author_name,first_publish_year,subject`)
-      .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [] }))),
+    getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=title,author_name,first_publish_year,subject,ddc`)
+      .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc }))),
     getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${enc}&maxResults=8&printType=books${gKey()}`)
       .then(d => (d.items || []).map(i => gRec(i.volumeInfo))),
   ]);
