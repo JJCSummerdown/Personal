@@ -1,4 +1,4 @@
-const CACHE = 'bookscan-v8';
+const CACHE = 'bookscan-v9';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png', 'zxing.js', 'zxing_reader.wasm'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));

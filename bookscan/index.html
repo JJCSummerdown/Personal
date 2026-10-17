@@ -180,10 +180,11 @@ function openSync() {
     <div id="syncMsg" style="font-size:14px"></div>
     <label>Web app URL</label><input id="sUrl" value="${esc(c.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off">
     <label>Secret key</label><input id="sKey" value="${esc(c.key || '')}" autocapitalize="off" autocorrect="off">
+    <label>Google Books API key (optional — fixes "HTTP 429" lookups)</label><input id="sG" value="${esc(c.gkey || '')}" autocapitalize="off" autocorrect="off">
     <div class="btns"><button class="ghost grow" id="sSave">Save</button><button class="grow" id="sSync">Sync now</button></div>`;
   $('sheetBg').classList.add('on');
   syncStatus();
-  const save = () => localStorage.setItem('sheetCfg', JSON.stringify({ url: $('sUrl').value.trim(), key: $('sKey').value.trim() }));
+  const save = () => localStorage.setItem('sheetCfg', JSON.stringify({ url: $('sUrl').value.trim(), key: $('sKey').value.trim(), gkey: $('sG').value.trim() }));
   $('sSave').onclick = () => { save(); syncStatus(); };
   $('sSync').onclick = async () => {
     save();
@@ -240,6 +241,7 @@ async function getJson(name, url) {
     return r.json();
   }
 }
+const gKey = () => cfg().gkey ? '&key=' + encodeURIComponent(cfg().gkey) : '';   // optional free API key lifts Google's shared rate limit
 const year = v => (String(v || '').match(/\d{4}/) || [''])[0];
 
 const SOURCES = [
@@ -255,12 +257,12 @@ const SOURCES = [
                   cats: [], subjects: (o.subjects || []).map(x => x.name) };
   },
   async isbn => {   // Google Books: best for categories
-    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
+    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1${gKey()}`);
     const g = d.items?.[0]?.volumeInfo;
     return g && gRec(g);
   },
   async isbn => {   // Google Books free-text query: finds editions the isbn: index misses, but only accepted if the ISBN matches
-    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${isbn}&maxResults=5`);
+    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${isbn}&maxResults=5${gKey()}`);
     const g = (d.items || []).map(i => i.volumeInfo).find(v => (v.industryIdentifiers || []).some(x => x.identifier === isbn));
     return g && gRec(g);
   },
@@ -316,7 +318,7 @@ async function searchTitles(q) {
   const res = await Promise.allSettled([
     getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=title,author_name,first_publish_year,subject`)
       .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [] }))),
-    getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${enc}&maxResults=8&printType=books`)
+    getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${enc}&maxResults=8&printType=books${gKey()}`)
       .then(d => (d.items || []).map(i => gRec(i.volumeInfo))),
   ]);
   const hits = res.flatMap(r => r.status === 'fulfilled' ? r.value : []);
@@ -347,7 +349,10 @@ async function handleIsbn(raw) {
     }
     await saveBook(book);
     toast(`✓ ${book.title}`); render(); return 'added';
-  } catch (e) { toast(`Couldn't look up ${isbn} (${e.message}). Not saved — scan it again.`, true); return 'error'; }
+  } catch (e) {
+    await saveBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
+    toast(`Saved ${isbn} without details (${e.message}). Open it and tap Look up again later.`, true); render(); return 'blank';
+  }
 }
 
 async function render() {
