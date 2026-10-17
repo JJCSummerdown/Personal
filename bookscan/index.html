@@ -228,28 +228,60 @@ function to10(s13) {
 const amazonUrl = i13 => to10(i13) ? `https://${AMAZON_DOMAIN}/dp/${to10(i13)}` : `https://${AMAZON_DOMAIN}/s?k=${i13}`;
 
 // ---------- lookup ----------
-const j = async u => { const r = await fetch(u); if (!r.ok) throw new Error(r.status); return r.json(); };
+// Three sources are tried in parallel. Failures are reported (never silently treated as "not found").
+async function getJson(name, url) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let r;
+    try { r = await fetch(url, { signal: AbortSignal.timeout(8000) }); }
+    catch (e) { throw new Error(`${name}: ${e.name === 'TimeoutError' ? 'timed out' : 'could not connect'}`); }
+    if ((r.status === 429 || r.status >= 500) && attempt === 0) { await new Promise(res => setTimeout(res, 1500)); continue; }
+    if (!r.ok) throw new Error(`${name}: HTTP ${r.status}`);
+    return r.json();
+  }
+}
+const year = v => (String(v || '').match(/\d{4}/) || [''])[0];
+
+const SOURCES = [
+  async isbn => {   // Open Library search: best for original publication year
+    const d = await getJson('Open Library', `https://openlibrary.org/search.json?q=isbn:${isbn}&fields=title,author_name,first_publish_year,subject&limit=1`);
+    const o = d.docs?.[0];
+    return o && { title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [] };
+  },
+  async isbn => {   // Open Library edition data: catches books the search index misses
+    const d = await getJson('Open Library', `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&jscmd=data&format=json`);
+    const o = d[`ISBN:${isbn}`];
+    return o && { title: [o.title, o.subtitle].filter(Boolean).join(': '), authors: (o.authors || []).map(a => a.name), year: year(o.publish_date),
+                  cats: [], subjects: (o.subjects || []).map(x => x.name) };
+  },
+  async isbn => {   // Google Books: best for categories
+    const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
+    const g = d.items?.[0]?.volumeInfo;
+    return g && { title: [g.title, g.subtitle].filter(Boolean).join(': '), authors: g.authors || [], year: year(g.publishedDate),
+                  cats: (g.categories || []).flatMap(c => c.split('/').map(x => x.trim())).filter(Boolean), subjects: [] };
+  },
+];
+
+// Resolves to a book, or null if every source answered and none knows it. Throws if sources failed and nothing was found.
 async function lookup(isbn13) {
-  const [ol, gb] = await Promise.allSettled([
-    j(`https://openlibrary.org/search.json?q=isbn:${isbn13}&fields=title,author_name,first_publish_year,subject&limit=1`),
-    j(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn13}&maxResults=1`),
-  ]);
-  const o = ol.status === 'fulfilled' ? ol.value.docs?.[0] : null;
-  const g = gb.status === 'fulfilled' ? gb.value.items?.[0]?.volumeInfo : null;
-  if (!o && !g) return null;
-  const gcats = (g?.categories || []).flatMap(c => c.split('/').map(s => s.trim())).filter(Boolean);
+  const res = await Promise.allSettled(SOURCES.map(f => f(isbn13)));
+  const recs = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
+  const errs = [...new Set(res.filter(r => r.status === 'rejected').map(r => r.reason.message))];
+  if (!recs.length) { if (errs.length) throw new Error(errs.join('; ')); return null; }
+
+  const first = f => recs.map(f).find(v => v && String(v).length) || '';
+  const cats = recs.flatMap(r => r.cats);
   const tagSet = new Map();
-  [...gcats, ...(o?.subject || []).slice(0, 15)].forEach(t => {
-    t = t.replace(/;/g, ',').trim();
+  [...cats, ...recs.flatMap(r => r.subjects.slice(0, 15))].forEach(t => {
+    t = String(t).replace(/;/g, ',').trim();
     if (t && !tagSet.has(t.toLowerCase())) tagSet.set(t.toLowerCase(), t);
   });
   return {
     isbn: isbn13,
-    title: o?.title || [g?.title, g?.subtitle].filter(Boolean).join(': '),
-    author: (o?.author_name || g?.authors || []).join(', '),
-    published: o?.first_publish_year ? String(o.first_publish_year) : (g?.publishedDate || ''),
-    category: gcats[0] || '',
-    subcategory: gcats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '',
+    title: first(r => r.title),
+    author: (recs.map(r => r.authors).find(a => a.length) || []).join(', '),
+    published: String(first(r => r.year)),
+    category: cats[0] || '',
+    subcategory: cats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '',
     tags: [...tagSet.values()].slice(0, 20).join(';'),
     amazon: amazonUrl(isbn13),
     added: new Date().toISOString(),
@@ -279,7 +311,7 @@ async function handleIsbn(raw) {
     }
     await saveBook(book);
     toast(`✓ ${book.title}`); render(); return 'added';
-  } catch (e) { toast('Lookup failed: ' + e.message, true); return 'error'; }
+  } catch (e) { toast(`Couldn't look up ${isbn} (${e.message}). Not saved — scan it again.`, true); return 'error'; }
 }
 
 async function render() {
@@ -307,11 +339,21 @@ async function openSheet(isbn) {
       : `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
     <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Open on Amazon ↗</a>
     <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
+    <button class="ghost" id="reB" style="width:100%;margin-top:14px">Look up again</button>
     <div class="btns"><button class="danger" id="delB">Delete</button><button class="grow" id="saveB">Save</button></div>`;
   $('sheetBg').classList.add('on');
   $('saveB').onclick = async () => {
     $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
     await saveBook(b); closeSheet(); render();
+  };
+  $('reB').onclick = async () => {
+    $('reB').textContent = 'Looking up…';
+    try {
+      const f = await lookup(isbn);
+      if (!f) toast('No match found in any source', true);
+      else { $('sheet').querySelectorAll('[data-f]').forEach(el => { if (!el.value.trim() && f[el.dataset.f]) el.value = f[el.dataset.f]; }); toast('Filled in — tap Save'); }
+    } catch (e) { toast(e.message, true); }
+    $('reB').textContent = 'Look up again';
   };
   $('delB').onclick = async () => { if (confirm('Delete this book?')) { await removeBook(isbn); closeSheet(); render(); } };
 }
