@@ -1,5 +1,5 @@
-const CACHE = 'bookscan-v7';
-const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'bookscan-v8';
+const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png', 'zxing.js', 'zxing_reader.wasm'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
   self.skipWaiting();
@@ -14,7 +14,7 @@ self.addEventListener('fetch', e => {
   // only the app's own files and the scanner library are cached; lookups and sheet sync always hit the network
   if (e.request.method !== 'GET' || !(own || url.host === 'unpkg.com')) return;
   e.respondWith(caches.open(CACHE).then(async c => {
-    if (own) {
+    if (own && !/zxing/.test(url.pathname)) {
       // network first (bypassing the browser's HTTP cache) so updates show up on the next open; cached copy only when offline
       try {
         const r = await fetch(e.request, { cache: 'no-cache' });
@@ -22,7 +22,7 @@ self.addEventListener('fetch', e => {
         return r;
       } catch (_) { return (await c.match(e.request)) || (await c.match('index.html')); }
     }
-    // the scanner library never changes: cache first
+    // the scanner library (self-hosted zxing files, and any CDN script) never changes: cache first
     const hit = await c.match(e.request);
     return hit || fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; });
   }));
