@@ -305,9 +305,15 @@ const DDC_DIV = { 0:'General works',10:'Bibliography',20:'Library & information 
   800:'Literature',810:'American literature',820:'English literature',830:'German literature',840:'French literature',850:'Italian literature',860:'Spanish & Portuguese literature',870:'Latin literature',880:'Greek literature',890:'Other literatures',
   900:'History',910:'Geography & travel',920:'Biography',930:'Ancient history',940:'History of Europe',950:'History of Asia',960:'History of Africa',970:'History of North America',980:'History of South America',990:'History of other areas' };
 function ddcCats(list) {
-  const m = (list || []).map(d => String(d).match(/^\d{3}/)).find(Boolean);   // first usable class number, e.g. "230.092" -> 230
-  if (!m) return [];
-  const n = +m[0], main = DDC_MAIN[Math.floor(n / 100)], div = DDC_DIV[Math.floor(n / 10) * 10];
+  // Open Library merges the Dewey numbers of every edition ("028.5", "j823.914", "468", "823"...), so take the class that appears most often
+  const counts = new Map();
+  for (const d of list || []) {
+    const m = String(d).replace(/^[^\d]+/, '').match(/^\d{3}/);   // "j823.914" -> 823; "[Fic]" is skipped
+    if (m) counts.set(+m[0], (counts.get(+m[0]) || 0) + 1);
+  }
+  if (!counts.size) return [];
+  const n = [...counts.entries()].reduce((best, e) => e[1] > best[1] ? e : best)[0];   // ties keep the earliest
+  const main = DDC_MAIN[Math.floor(n / 100)], div = DDC_DIV[Math.floor(n / 10) * 10];
   return [main, div && div !== main ? div : ''].filter(Boolean);
 }
 // drop Open Library bookkeeping tags such as "series:Harry_Potter", "nyt:...", "Accessible book"
