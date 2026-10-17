@@ -2,73 +2,104 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f5d50">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="BookScan">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>BookScan</title>
 <style>
-  :root { --bg:#faf8f4; --fg:#222; --muted:#777; --card:#fff; --line:#e4e0d8; --accent:#2f5d50; }
+  :root { --bg:#faf8f4; --fg:#222; --muted:#777; --card:#fff; --line:#e4e0d8; --accent:#2f5d50; --danger:#b33;
+          --top:env(safe-area-inset-top); --bot:env(safe-area-inset-bottom); }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#222; --line:#333; --accent:#6fb59f; }
+    :root { --bg:#141414; --fg:#eee; --muted:#9a9a9a; --card:#212121; --line:#333; --accent:#6fb59f; --danger:#e86; }
   }
-  * { box-sizing:border-box; }
-  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
-  main { max-width:900px; margin:0 auto; padding:16px; }
-  h1 { font-size:20px; margin:0 0 12px; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
-  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
-  button.alt { background:transparent; color:var(--accent); }
-  button.del { background:transparent; color:#b33; border-color:#b33; padding:2px 8px; }
-  input[type=text] { font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); width:170px; }
-  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-  #reader { width:100%; max-width:420px; margin-top:10px; }
-  #status { color:var(--muted); margin-top:8px; min-height:1.4em; }
-  #status.err { color:#b33; }
-  .tablewrap { overflow-x:auto; }
-  table { border-collapse:collapse; width:100%; min-width:720px; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { font-size:12px; text-transform:uppercase; color:var(--muted); }
-  td[contenteditable]:focus { outline:2px solid var(--accent); }
-  a { color:var(--accent); }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body { margin:0; height:100%; }
+  body { font:16px/1.4 system-ui,-apple-system,sans-serif; background:var(--bg); color:var(--fg); overscroll-behavior-y:none; }
+  button { font:inherit; border:0; border-radius:12px; min-height:48px; padding:0 18px; background:var(--accent); color:var(--bg); cursor:pointer; }
+  button.ghost { background:transparent; color:var(--accent); border:1px solid var(--line); }
+  button.danger { background:transparent; color:var(--danger); border:1px solid var(--line); }
+  input, textarea { font:inherit; width:100%; min-height:48px; padding:10px 12px; border:1px solid var(--line); border-radius:12px; background:var(--card); color:var(--fg); }
+  textarea { min-height:84px; resize:vertical; }
+  label { display:block; font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:12px 0 4px; }
+
+  header { position:sticky; top:0; z-index:5; background:var(--bg); padding:calc(var(--top) + 10px) 14px 10px; border-bottom:1px solid var(--line); }
+  .bar { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+  .bar h1 { flex:1; font-size:20px; margin:0; }
+  .bar small { color:var(--muted); }
+  .bar button { min-height:40px; padding:0 12px; }
+
+  #list { padding:12px 14px calc(110px + var(--bot)); }
+  .book { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px 14px; margin-bottom:10px; }
+  .book:active { opacity:.7; }
+  .book h3 { margin:0 0 2px; font-size:16px; }
+  .book .meta { color:var(--muted); font-size:14px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  .chip { font-size:12px; padding:2px 9px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .empty { text-align:center; color:var(--muted); margin-top:64px; padding:0 24px; }
+
+  #dock { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(12px + var(--bot)); display:flex; gap:10px;
+          background:linear-gradient(transparent, var(--bg) 35%); z-index:6; }
+  #dock button { min-height:56px; font-weight:600; }
+  #scanBtn { flex:1; font-size:17px; }
+
+  #toast { position:fixed; left:14px; right:14px; bottom:calc(88px + var(--bot)); z-index:30; background:#222; color:#fff;
+           padding:12px 14px; border-radius:12px; font-size:15px; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; }
+  #toast.on { opacity:1; transform:none; }
+  #toast.err { background:var(--danger); }
+
+  /* scanner overlay */
+  #scanner { position:fixed; inset:0; z-index:20; background:#000; display:none; flex-direction:column; }
+  #scanner.on { display:flex; }
+  #reader { flex:1; min-height:0; overflow:hidden; }
+  #reader video { width:100% !important; height:100% !important; object-fit:cover; }
+  #scanTop { position:absolute; top:0; left:0; right:0; padding:calc(var(--top) + 12px) 14px 12px; display:flex; justify-content:space-between; align-items:center; color:#fff; z-index:2;
+             background:linear-gradient(#000a, transparent); }
+  #scanTop button { background:#fff3; color:#fff; min-height:44px; }
+  #aim { position:absolute; left:8%; right:8%; top:50%; height:26%; transform:translateY(-50%); border:2px solid #fff; border-radius:14px; box-shadow:0 0 0 100vmax #0006; z-index:1; pointer-events:none; }
+  #scanHint { position:absolute; left:0; right:0; bottom:calc(24px + var(--bot)); text-align:center; color:#fff; z-index:2; padding:0 20px; text-shadow:0 1px 4px #000; }
+
+  /* bottom sheet */
+  #sheetBg { position:fixed; inset:0; z-index:40; background:#0007; display:none; }
+  #sheetBg.on { display:block; }
+  #sheet { position:absolute; left:0; right:0; bottom:0; max-height:92%; overflow-y:auto; background:var(--bg); border-radius:20px 20px 0 0;
+           padding:16px 16px calc(16px + var(--bot)); }
+  #sheet .grab { width:40px; height:4px; border-radius:2px; background:var(--line); margin:0 auto 8px; }
+  #sheet .btns { display:flex; gap:10px; margin-top:18px; }
+  #sheet .btns .grow { flex:1; }
+  #sheet a { color:var(--accent); display:inline-block; margin-top:12px; }
 </style>
 </head>
 <body>
-<main>
-  <h1>📚 BookScan</h1>
+<header>
+  <div class="bar"><h1>📚 BookScan</h1><small id="count"></small><button class="ghost" id="csvBtn">Export</button></div>
+  <input id="filter" type="search" placeholder="Search your books" enterkeyhint="search">
+</header>
 
-  <div class="card">
-    <div class="row">
-      <button id="scanBtn">Scan barcode</button>
-      <input id="isbnIn" type="text" inputmode="numeric" placeholder="or type ISBN">
-      <button id="addBtn" class="alt">Look up</button>
-    </div>
-    <div id="reader"></div>
-    <div id="status"></div>
-  </div>
+<div id="list"></div>
 
-  <div class="card">
-    <div class="row" style="justify-content:space-between">
-      <strong id="count"></strong>
-      <span class="row">
-        <input id="filter" type="text" placeholder="Filter…">
-        <button id="csvBtn" class="alt">Export CSV</button>
-      </span>
-    </div>
-    <div class="tablewrap">
-      <table>
-        <thead><tr>
-          <th>Title</th><th>Author</th><th>First published</th><th>Category</th>
-          <th>Sub-category</th><th>Tags</th><th>Amazon</th><th></th>
-        </tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <p style="color:var(--muted);font-size:13px;margin-bottom:0">Click any cell (except link) to edit. Data is stored in this browser — export CSV to back up.</p>
-  </div>
-</main>
+<div id="dock">
+  <button class="ghost" id="typeBtn" aria-label="Enter ISBN manually">⌨︎</button>
+  <button id="scanBtn">📷 Scan books</button>
+</div>
+
+<div id="scanner">
+  <div id="scanTop"><strong id="scanCount">0 added</strong><button id="scanDone">Done</button></div>
+  <div id="reader"></div>
+  <div id="aim"></div>
+  <div id="scanHint">Hold the barcode inside the box. Scans keep running — tap Done when finished.</div>
+</div>
+
+<div id="sheetBg"><div id="sheet"></div></div>
+<div id="toast"></div>
 
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 const AMAZON_DOMAIN = 'www.amazon.co.uk';
-const FIELDS = ['title','author','published','category','subcategory','tags'];
+const FIELDS = [['title','Title'],['author','Author'],['published','Original publication'],['category','Main category'],['subcategory','Sub category'],['tags','Tags (separate with ;)']];
 
 // ---------- storage (IndexedDB) ----------
 const db = new Promise((res, rej) => {
@@ -94,13 +125,11 @@ const delBook = i => store('readwrite', s => s.delete(i));
 const clean = s => s.replace(/[^0-9Xx]/g, '').toUpperCase();
 function isbn13Valid(s) {
   if (!/^\d{13}$/.test(s)) return false;
-  const sum = [...s].reduce((a, c, i) => a + +c * (i % 2 ? 3 : 1), 0);
-  return sum % 10 === 0;
+  return [...s].reduce((a, c, i) => a + +c * (i % 2 ? 3 : 1), 0) % 10 === 0;
 }
 function isbn10Valid(s) {
   if (!/^\d{9}[\dX]$/.test(s)) return false;
-  const sum = [...s].reduce((a, c, i) => a + (c === 'X' ? 10 : +c) * (10 - i), 0);
-  return sum % 11 === 0;
+  return [...s].reduce((a, c, i) => a + (c === 'X' ? 10 : +c) * (10 - i), 0) % 11 === 0;
 }
 function to13(s) {
   if (s.length === 13) return s;
@@ -111,18 +140,13 @@ function to13(s) {
 function to10(s13) {
   if (!s13.startsWith('978')) return null;
   const b = s13.slice(3, 12);
-  const sum = [...b].reduce((a, c, i) => a + +c * (10 - i), 0);
-  const c = (11 - sum % 11) % 11;
+  const c = (11 - [...b].reduce((a, ch, i) => a + +ch * (10 - i), 0) % 11) % 11;
   return b + (c === 10 ? 'X' : c);
 }
-function amazonUrl(isbn13) {
-  const i10 = to10(isbn13);
-  return i10 ? `https://${AMAZON_DOMAIN}/dp/${i10}` : `https://${AMAZON_DOMAIN}/s?k=${isbn13}`;
-}
+const amazonUrl = i13 => to10(i13) ? `https://${AMAZON_DOMAIN}/dp/${to10(i13)}` : `https://${AMAZON_DOMAIN}/s?k=${i13}`;
 
 // ---------- lookup ----------
 const j = async u => { const r = await fetch(u); if (!r.ok) throw new Error(r.status); return r.json(); };
-
 async function lookup(isbn13) {
   const [ol, gb] = await Promise.allSettled([
     j(`https://openlibrary.org/search.json?q=isbn:${isbn13}&fields=title,author_name,first_publish_year,subject&limit=1`),
@@ -131,116 +155,143 @@ async function lookup(isbn13) {
   const o = ol.status === 'fulfilled' ? ol.value.docs?.[0] : null;
   const g = gb.status === 'fulfilled' ? gb.value.items?.[0]?.volumeInfo : null;
   if (!o && !g) return null;
-
-  // Google categories look like "Fiction / Science Fiction / General" or "Fiction"
   const gcats = (g?.categories || []).flatMap(c => c.split('/').map(s => s.trim())).filter(Boolean);
-  const category = gcats[0] || '';
-  const subcategory = gcats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '';
   const tagSet = new Map();
   [...gcats, ...(o?.subject || []).slice(0, 15)].forEach(t => {
     t = t.replace(/;/g, ',').trim();
     if (t && !tagSet.has(t.toLowerCase())) tagSet.set(t.toLowerCase(), t);
   });
-
   return {
     isbn: isbn13,
-    title: [o?.title || g?.title, g?.subtitle && !o ? g.subtitle : ''].filter(Boolean).join(': '),
+    title: o?.title || [g?.title, g?.subtitle].filter(Boolean).join(': '),
     author: (o?.author_name || g?.authors || []).join(', '),
     published: o?.first_publish_year ? String(o.first_publish_year) : (g?.publishedDate || ''),
-    category,
-    subcategory,
+    category: gcats[0] || '',
+    subcategory: gcats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '',
     tags: [...tagSet.values()].slice(0, 20).join(';'),
     amazon: amazonUrl(isbn13),
     added: new Date().toISOString(),
   };
 }
 
-// ---------- UI ----------
+// ---------- UI helpers ----------
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-function say(msg, err) { $('status').textContent = msg; $('status').className = err ? 'err' : ''; }
+let toastT;
+function toast(msg, err) {
+  const t = $('toast'); t.textContent = msg; t.className = 'on' + (err ? ' err' : '');
+  clearTimeout(toastT); toastT = setTimeout(() => t.className = '', 2800);
+}
+const buzz = ms => navigator.vibrate && navigator.vibrate(ms);
 
+// returns 'added' | 'dup' | 'blank' | 'invalid' | 'error'
 async function handleIsbn(raw) {
   const s = clean(raw);
-  if (!(isbn13Valid(s) || isbn10Valid(s))) return say(`"${raw}" isn't a valid ISBN.`, true);
+  if (!(isbn13Valid(s) || isbn10Valid(s))) { toast(`"${raw}" isn't a valid ISBN`, true); return 'invalid'; }
   const isbn = to13(s);
-  if (await getBook(isbn)) return say(`Already in your library (${isbn}).`);
-  say(`Looking up ${isbn}…`);
+  if (await getBook(isbn)) { toast('Already in your library'); return 'dup'; }
+  toast(`Looking up ${isbn}…`);
   try {
     const book = await lookup(isbn);
     if (!book) {
       await putBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
-      say(`No match for ${isbn}. Added a blank row — fill it in by hand.`, true);
-    } else {
-      await putBook(book);
-      say(`Added: ${book.title} — ${book.author}`);
+      toast(`No match for ${isbn} — blank row added`, true); render(); return 'blank';
     }
-    render();
-  } catch (e) { say('Lookup failed: ' + e.message, true); }
+    await putBook(book);
+    toast(`✓ ${book.title}`); render(); return 'added';
+  } catch (e) { toast('Lookup failed: ' + e.message, true); return 'error'; }
 }
 
 async function render() {
   const q = $('filter').value.toLowerCase();
   const books = (await allBooks()).sort((a, b) => b.added.localeCompare(a.added));
   const shown = books.filter(b => !q || JSON.stringify(b).toLowerCase().includes(q));
-  $('count').textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
-  $('rows').innerHTML = shown.map(b => `<tr data-isbn="${b.isbn}">
-    ${FIELDS.map(f => `<td contenteditable data-f="${f}">${esc(b[f])}</td>`).join('')}
-    <td><a href="${esc(b.amazon)}" target="_blank" rel="noopener">View</a></td>
-    <td><button class="del" title="Delete">✕</button></td></tr>`).join('');
+  $('count').textContent = books.length ? `${books.length}` : '';
+  $('list').innerHTML = shown.length ? shown.map(b => `
+    <div class="book" data-isbn="${b.isbn}">
+      <h3>${esc(b.title) || '<i>Untitled — tap to fill in</i>'}</h3>
+      <div class="meta">${esc(b.author)}${b.published ? ' · ' + esc(b.published) : ''}</div>
+      <div class="meta">${[b.category, b.subcategory].filter(Boolean).map(esc).join(' › ')}</div>
+      ${b.tags ? `<div class="chips">${b.tags.split(';').slice(0, 5).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
+    </div>`).join('')
+    : `<div class="empty">${books.length ? 'No matches.' : 'No books yet.<br>Tap <b>Scan books</b> and point your camera at a barcode.'}</div>`;
 }
-
-$('rows').addEventListener('focusout', async e => {
-  const td = e.target.closest('td[data-f]'); if (!td) return;
-  const isbn = td.parentElement.dataset.isbn, b = await getBook(isbn);
-  if (b && b[td.dataset.f] !== td.textContent.trim()) { b[td.dataset.f] = td.textContent.trim(); putBook(b); }
-});
-$('rows').addEventListener('click', async e => {
-  if (!e.target.classList.contains('del')) return;
-  const isbn = e.target.closest('tr').dataset.isbn;
-  if (confirm('Delete this book?')) { await delBook(isbn); render(); }
-});
 $('filter').addEventListener('input', render);
-$('addBtn').onclick = () => { handleIsbn($('isbnIn').value); $('isbnIn').value = ''; };
-$('isbnIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('addBtn').click(); });
 
+// ---------- edit sheet ----------
+async function openSheet(isbn) {
+  const b = await getBook(isbn); if (!b) return;
+  $('sheet').innerHTML = `<div class="grab"></div>
+    ${FIELDS.map(([f, l]) => f === 'tags'
+      ? `<label>${l}</label><textarea data-f="${f}">${esc(b[f])}</textarea>`
+      : `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
+    <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Open on Amazon ↗</a>
+    <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
+    <div class="btns"><button class="danger" id="delB">Delete</button><button class="grow" id="saveB">Save</button></div>`;
+  $('sheetBg').classList.add('on');
+  $('saveB').onclick = async () => {
+    $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
+    await putBook(b); closeSheet(); render();
+  };
+  $('delB').onclick = async () => { if (confirm('Delete this book?')) { await delBook(isbn); closeSheet(); render(); } };
+}
+const closeSheet = () => $('sheetBg').classList.remove('on');
+$('sheetBg').addEventListener('click', e => { if (e.target.id === 'sheetBg') closeSheet(); });
+$('list').addEventListener('click', e => { const c = e.target.closest('.book'); if (c) openSheet(c.dataset.isbn); });
+
+// ---------- manual entry ----------
+$('typeBtn').onclick = () => {
+  const v = prompt('Enter ISBN (10 or 13 digits)');
+  if (v) handleIsbn(v);
+};
+
+// ---------- CSV export ----------
 $('csvBtn').onclick = async () => {
-  const cols = ['isbn', ...FIELDS, 'amazon'];
+  const cols = ['isbn', 'title', 'author', 'published', 'category', 'subcategory', 'tags', 'amazon'];
   const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Amazon link'];
   const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const csv = [head, ...(await allBooks()).map(b => cols.map(c => b[c]))].map(r => r.map(cell).join(',')).join('\r\n');
+  const file = new File(['﻿' + csv], 'books.csv', { type: 'text/csv' });
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: 'BookScan library' }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
-  a.download = 'books.csv'; a.click();
+  a.href = URL.createObjectURL(file); a.download = 'books.csv'; a.click();
 };
 
-// ---------- scanner ----------
-let scanner = null, lastCode = '', lastAt = 0;
-$('scanBtn').onclick = async () => {
-  if (scanner) { await scanner.stop().catch(() => {}); scanner = null; $('reader').innerHTML = ''; $('scanBtn').textContent = 'Scan barcode'; return; }
+// ---------- scanner (continuous batch mode) ----------
+let scanner = null, added = 0, busy = false;
+const seen = new Map();   // code -> last time handled, to ignore repeat reads of the same barcode
+async function startScan() {
+  added = 0; $('scanCount').textContent = '0 added';
+  $('scanner').classList.add('on');
   scanner = new Html5Qrcode('reader', {
     formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A],
     experimentalFeatures: { useBarCodeDetectorIfSupported: true },
     verbose: false,
   });
   try {
-    await scanner.start({ facingMode: 'environment' },
-      { fps: 10, qrbox: { width: 300, height: 120 } },
-      code => {
+    await scanner.start({ facingMode: 'environment' }, { fps: 10, aspectRatio: window.innerHeight / window.innerWidth },
+      async code => {
         const now = Date.now();
-        if (code === lastCode && now - lastAt < 5000) return;   // debounce repeat reads
-        lastCode = code; lastAt = now;
-        if (navigator.vibrate) navigator.vibrate(60);
-        handleIsbn(code);
+        if (busy || now - (seen.get(code) || 0) < 6000) return;
+        seen.set(code, now); busy = true; buzz(60);
+        try { if (await handleIsbn(code) === 'added') $('scanCount').textContent = `${++added} added`; }
+        finally { busy = false; }
       });
-    $('scanBtn').textContent = 'Stop scanning';
-    say('Point the camera at the barcode on the back (978… / 979…).');
   } catch (e) {
-    scanner = null;
-    say('Camera unavailable (needs HTTPS and permission): ' + e, true);
+    await stopScan();
+    toast('Camera unavailable — allow camera access (needs HTTPS)', true);
   }
-};
+}
+async function stopScan() {
+  try { await scanner?.stop(); scanner?.clear(); } catch (_) {}
+  scanner = null; $('scanner').classList.remove('on');
+}
+$('scanBtn').onclick = startScan;
+$('scanDone').onclick = stopScan;
 
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 render();
 </script>
 </body>
