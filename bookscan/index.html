@@ -136,27 +136,30 @@ async function saveBook(b) { await putBook(b); setQueue([...queue(), { t:'put', 
 async function removeBook(isbn) { await delBook(isbn); setQueue([...queue(), { t:'del', isbn }]); flush(); }
 
 let flushing = false;
-async function flush() {
+async function send() {
   const { url, key } = cfg();
-  if (!url || flushing || !queue().length || !navigator.onLine) return syncStatus();
-  flushing = true;
   const sent = queue();
-  try {
-    // text/plain avoids a CORS preflight, which Apps Script can't answer
-    const r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: JSON.stringify({ key, ops: sent }) });
-    const out = await r.json();
-    if (!out.ok) throw new Error(out.error || 'rejected');
-    setQueue(queue().slice(sent.length));
-  } catch (e) { syncStatus('Sync failed: ' + e.message, true); }
-  finally { flushing = false; syncStatus(); }
+  // text/plain avoids a CORS preflight, which Apps Script can't answer
+  const r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: JSON.stringify({ key, ops: sent }) });
+  const text = await r.text();
+  let out; try { out = JSON.parse(text); } catch (_) { throw new Error(`Google replied with a web page, not data (HTTP ${r.status}). Check the deployment is "Anyone" and the URL ends /exec.`); }
+  if (!out.ok) throw new Error(out.error || 'rejected');
+  setQueue(queue().slice(sent.length));
+}
+async function flush() {
+  if (!cfg().url || flushing || !queue().length || !navigator.onLine) return syncStatus();
+  flushing = true;
+  try { await send(); } catch (e) { syncStatus('Sync failed: ' + e.message, true); return; }
+  finally { flushing = false; }
+  syncStatus();
 }
 
 async function pull() {
   const { url, key } = cfg();
-  await flush();
-  if (queue().length) throw new Error('Could not upload pending changes');
+  if (queue().length) await send();
   const r = await fetch(`${url}?key=${encodeURIComponent(key || '')}`);
-  const out = await r.json();
+  const text = await r.text();
+  let out; try { out = JSON.parse(text); } catch (_) { throw new Error(`Google replied with a web page, not data (HTTP ${r.status}). Check the deployment is "Anyone" and the URL ends /exec.`); }
   if (!out.ok) throw new Error(out.error || 'rejected');
   for (const b of out.books) if (b.isbn) await putBook(b);   // sheet wins for books it holds
   return out.books.length;
@@ -189,8 +192,8 @@ function openSync() {
       // first-time connect: upload everything already on this phone
       if (!localStorage.getItem('sheetSeeded')) {
         setQueue([...queue(), ...(await allBooks()).map(book => ({ t:'put', book }))]);
-        await flush();
-        if (!queue().length) localStorage.setItem('sheetSeeded', '1');
+        await send();
+        localStorage.setItem('sheetSeeded', '1');
       }
       const n = await pull(); render();
       syncStatus(`Done — ${n} books in the sheet`);
