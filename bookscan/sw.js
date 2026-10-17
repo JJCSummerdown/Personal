@@ -1,4 +1,4 @@
-const CACHE = 'bookscan-v1';
+const CACHE = 'bookscan-v2';
 const SHELL = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)));
@@ -10,8 +10,8 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  // book lookups always go to the network; everything else is cache-first, refreshed in background
-  if (e.request.method !== 'GET' || /openlibrary|googleapis/.test(url.host)) return;
+  // only the app's own files and the scanner library are cached; lookups and sheet sync always hit the network
+  if (e.request.method !== 'GET' || !(url.origin === self.location.origin || url.host === 'unpkg.com')) return;
   e.respondWith(caches.open(CACHE).then(async c => {
     const hit = await c.match(e.request);
     const net = fetch(e.request).then(r => { if (r.ok) c.put(e.request, r.clone()); return r; }).catch(() => hit);
