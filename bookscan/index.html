@@ -58,9 +58,10 @@
   #reader video { width:100% !important; height:100% !important; object-fit:cover; }
   #scanTop { position:absolute; top:0; left:0; right:0; padding:calc(var(--top) + 12px) 14px 12px; display:flex; justify-content:space-between; align-items:center; color:#fff; z-index:2;
              background:linear-gradient(#000a, transparent); }
+  #scanHint button { pointer-events:auto; }
   #scanTop button { background:#fff3; color:#fff; min-height:44px; }
   #aim { position:absolute; left:8%; right:8%; top:50%; height:26%; transform:translateY(-50%); border:2px solid #fff; border-radius:14px; box-shadow:0 0 0 100vmax #0006; z-index:1; pointer-events:none; }
-  #scanHint { position:absolute; left:0; right:0; bottom:calc(24px + var(--bot)); text-align:center; color:#fff; z-index:2; padding:0 20px; text-shadow:0 1px 4px #000; }
+  #scanHint { pointer-events:none; position:absolute; left:0; right:0; bottom:calc(24px + var(--bot)); text-align:center; color:#fff; z-index:2; padding:0 20px; text-shadow:0 1px 4px #000; }
 
   /* bottom sheet */
   #sheetBg { position:fixed; inset:0; z-index:40; background:#0007; display:none; }
@@ -88,15 +89,15 @@
 
 <div id="scanner">
   <div id="scanTop"><strong id="scanCount">0 added</strong><button id="scanDone">Done</button></div>
-  <div id="reader"></div>
+  <div id="reader"><video id="cam" playsinline muted autoplay></video></div>
   <div id="aim"></div>
-  <div id="scanHint">Hold the barcode inside the box. Scans keep running — tap Done when finished.</div>
+  <div id="scanHint">Hold the barcode inside the box and keep it steady. Scans keep running — tap Done when finished.<br><button id="photoBtn" type="button" style="margin-top:10px;background:#fff3;color:#fff;min-height:44px">Not reading? Take a photo instead</button><input id="photoIn" type="file" accept="image/*" capture="environment" hidden></div>
 </div>
 
 <div id="sheetBg"><div id="sheet"></div></div>
 <div id="toast"></div>
 
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="zxing.js"></script>
 <script>
 const AMAZON_DOMAIN = 'www.amazon.co.uk';
 const FIELDS = [['title','Title'],['author','Author'],['published','Original publication'],['category','Main category'],['subcategory','Sub category'],['tags','Tags (separate with ;)']];
@@ -435,34 +436,76 @@ $('csvBtn').onclick = async () => {
 };
 
 // ---------- scanner (continuous batch mode) ----------
-let scanner = null, added = 0, busy = false;
+// Camera frames are decoded by zxing-wasm (self-hosted), which copes with dark covers, tilt and small barcodes far better than the JS decoders.
+ZXingWASM.setZXingModuleOverrides({ locateFile: f => f.endsWith('.wasm') ? 'zxing_reader.wasm' : f });
+const READ_OPTS = { formats: ['EAN-13'], tryHarder: true, tryRotate: true, tryInvert: false, maxNumberOfSymbols: 1 };
+const isbnFrom = res => res.map(r => (r.text.match(/97[89]\d{10}/) || [])[0]).find(c => c && isbn13Valid(c));
+
+let stream = null, scanning = false, added = 0, busy = false;
 const seen = new Map();   // code -> last time handled, to ignore repeat reads of the same barcode
+
+async function onCode(code) {
+  const now = Date.now();
+  if (busy || now - (seen.get(code) || 0) < 6000) return;
+  seen.set(code, now); busy = true; buzz(60);
+  try { if (await handleIsbn(code) === 'added') $('scanCount').textContent = `${++added} added`; }
+  finally { busy = false; }
+}
+
+async function scanLoop(video) {
+  const cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+  while (scanning) {
+    if (video.readyState >= 2 && video.videoWidth) {
+      // full-width strip across the middle half of the frame, at the camera's native resolution
+      const vw = video.videoWidth, vh = video.videoHeight, sh = Math.round(vh * 0.5), sy = Math.round((vh - sh) / 2);
+      cv.width = vw; cv.height = sh;
+      cx.drawImage(video, 0, sy, vw, sh, 0, 0, vw, sh);
+      try {
+        const code = isbnFrom(await ZXingWASM.readBarcodes(cx.getImageData(0, 0, vw, sh), READ_OPTS));
+        if (code) await onCode(code);
+      } catch (_) {}
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+}
+
 async function startScan() {
   added = 0; $('scanCount').textContent = '0 added';
   $('scanner').classList.add('on');
-  scanner = new Html5Qrcode('reader', {
-    formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A],
-    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
-    verbose: false,
-  });
   try {
-    await scanner.start({ facingMode: 'environment' }, { fps: 10, aspectRatio: window.innerHeight / window.innerWidth },
-      async code => {
-        const now = Date.now();
-        if (busy || now - (seen.get(code) || 0) < 6000) return;
-        seen.set(code, now); busy = true; buzz(60);
-        try { if (await handleIsbn(code) === 'added') $('scanCount').textContent = `${++added} added`; }
-        finally { busy = false; }
-      });
+    // ask for a high-resolution stream: the default (~640x480) leaves a book barcode too few pixels to read
+    stream = await navigator.mediaDevices.getUserMedia({ audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    const v = $('cam'); v.srcObject = stream; await v.play();
+    try { await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (_) {}
+    scanning = true; scanLoop(v);
   } catch (e) {
     await stopScan();
     toast('Camera unavailable — allow camera access (needs HTTPS)', true);
   }
 }
 async function stopScan() {
-  try { await scanner?.stop(); scanner?.clear(); } catch (_) {}
-  scanner = null; $('scanner').classList.remove('on');
+  scanning = false;
+  stream?.getTracks().forEach(t => t.stop()); stream = null;
+  $('cam').srcObject = null; $('scanner').classList.remove('on');
 }
+
+// Photo fallback: the phone's own camera app focuses far better than a live web stream
+async function readPhoto(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const k = Math.min(1, 2400 / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+  const cx = cv.getContext('2d', { willReadFrequently: true }); cx.drawImage(bmp, 0, 0, cv.width, cv.height);
+  return isbnFrom(await ZXingWASM.readBarcodes(cx.getImageData(0, 0, cv.width, cv.height), READ_OPTS));
+}
+$('photoBtn').onclick = () => $('photoIn').click();
+$('photoIn').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  toast('Reading photo…');
+  try { const code = await readPhoto(f); if (code) { seen.delete(code); await onCode(code); } else toast('No barcode found in the photo — try closer and sharper', true); }
+  catch (err) { toast('Could not read the photo: ' + err.message, true); }
+};
+
 $('scanBtn').onclick = startScan;
 $('scanDone').onclick = stopScan;
 

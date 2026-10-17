@@ -19,3 +19,7 @@ Mobile-first installable web app (PWA): scan a book's barcode → look up ISBN (
 3. In the app tap ☁︎, paste the URL and the same key, tap **Sync now**.
 
 Changes upload automatically (and queue while offline). *Sync now* also pulls the sheet down, so a second device sees the same books. The sheet wins for books it already holds; rows deleted in the sheet are not removed from the phone.
+
+## Scanner
+
+Barcodes are decoded in the browser by [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) (`zxing.js` + `zxing_reader.wasm`, self-hosted, MIT licence in `ZXING-WASM-LICENSE`). The camera is opened at up to 1920x1080 and the middle strip of each frame is decoded. If live scanning struggles, *Take a photo instead* decodes a photo from the phone's own camera.
