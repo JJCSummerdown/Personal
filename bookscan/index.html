@@ -263,13 +263,17 @@ const SOURCES = [
     const g = (d.items || []).map(i => i.volumeInfo).find(v => (v.industryIdentifiers || []).some(x => x.identifier === isbn));
     return g && gRec(g);
   },
-  async isbn => {   // Crossref: strong for university-press and scholarly books
-    const d = await getJson('Crossref', `https://api.crossref.org/works?filter=isbn:${isbn}&rows=1&select=title,subtitle,author,editor,issued,subject`);
-    const c = d.message?.items?.[0];
-    if (!c) return null;
-    const people = (c.author?.length ? c.author : c.editor) || [];
-    return { title: [c.title?.[0], c.subtitle?.[0]].filter(Boolean).join(': '), authors: people.map(a => [a.given, a.family].filter(Boolean).join(' ') || a.name).filter(Boolean),
-             year: c.issued?.['date-parts']?.[0]?.[0], cats: [], subjects: c.subject || [] };
+  async isbn => {   // Crossref: strong for university-press and scholarly books. Every chapter shares the book's ISBN, so pick carefully.
+    const d = await getJson('Crossref', `https://api.crossref.org/works?filter=isbn:${isbn}&rows=40&select=title,subtitle,author,editor,issued,subject,type,container-title`);
+    const items = d.message?.items || [];
+    const names = list => (list || []).map(a => [a.given, a.family].filter(Boolean).join(' ') || a.name).filter(Boolean);
+    const BOOK = ['book', 'monograph', 'edited-book', 'reference-book', 'book-set', 'book-series'];
+    const bk = items.find(c => BOOK.includes(c.type));
+    if (bk) return { title: [bk.title?.[0], bk.subtitle?.[0]].filter(Boolean).join(': '), authors: names(bk.author?.length ? bk.author : bk.editor),
+                     year: bk.issued?.['date-parts']?.[0]?.[0], cats: [], subjects: bk.subject || [] };
+    // Only chapters on record: the book's title is each chapter's "container title"; chapter authors are not the book's authors
+    const ch = items.find(c => c['container-title']?.[0]);
+    return ch && { title: ch['container-title'][0], authors: [], year: ch.issued?.['date-parts']?.[0]?.[0], cats: [], subjects: [] };
   },
 ];
 const gRec = g => ({ title: [g.title, g.subtitle].filter(Boolean).join(': '), authors: g.authors || [], year: year(g.publishedDate),
