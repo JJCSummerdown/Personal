@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BookScan</title>
+<style>
+  :root { --bg:#faf8f4; --fg:#222; --muted:#777; --card:#fff; --line:#e4e0d8; --accent:#2f5d50; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#222; --line:#333; --accent:#6fb59f; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:900px; margin:0 auto; padding:16px; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; margin-bottom:12px; }
+  button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid var(--accent); background:var(--accent); color:#fff; cursor:pointer; }
+  button.alt { background:transparent; color:var(--accent); }
+  button.del { background:transparent; color:#b33; border-color:#b33; padding:2px 8px; }
+  input[type=text] { font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); width:170px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #reader { width:100%; max-width:420px; margin-top:10px; }
+  #status { color:var(--muted); margin-top:8px; min-height:1.4em; }
+  #status.err { color:#b33; }
+  .tablewrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; min-width:720px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-size:12px; text-transform:uppercase; color:var(--muted); }
+  td[contenteditable]:focus { outline:2px solid var(--accent); }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>📚 BookScan</h1>
+
+  <div class="card">
+    <div class="row">
+      <button id="scanBtn">Scan barcode</button>
+      <input id="isbnIn" type="text" inputmode="numeric" placeholder="or type ISBN">
+      <button id="addBtn" class="alt">Look up</button>
+    </div>
+    <div id="reader"></div>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <strong id="count"></strong>
+      <span class="row">
+        <input id="filter" type="text" placeholder="Filter…">
+        <button id="csvBtn" class="alt">Export CSV</button>
+      </span>
+    </div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr>
+          <th>Title</th><th>Author</th><th>First published</th><th>Category</th>
+          <th>Sub-category</th><th>Tags</th><th>Amazon</th><th></th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:0">Click any cell (except link) to edit. Data is stored in this browser — export CSV to back up.</p>
+  </div>
+</main>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const AMAZON_DOMAIN = 'www.amazon.co.uk';
+const FIELDS = ['title','author','published','category','subcategory','tags'];
+
+// ---------- storage (IndexedDB) ----------
+const db = new Promise((res, rej) => {
+  const r = indexedDB.open('bookscan', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('books', { keyPath: 'isbn' });
+  r.onsuccess = () => res(r.result);
+  r.onerror = () => rej(r.error);
+});
+async function store(mode, fn) {
+  const d = await db;
+  return new Promise((res, rej) => {
+    const t = d.transaction('books', mode), req = fn(t.objectStore('books'));
+    t.oncomplete = () => res(req && req.result);
+    t.onerror = () => rej(t.error);
+  });
+}
+const allBooks = () => store('readonly', s => s.getAll());
+const putBook = b => store('readwrite', s => s.put(b));
+const getBook = i => store('readonly', s => s.get(i));
+const delBook = i => store('readwrite', s => s.delete(i));
+
+// ---------- ISBN helpers ----------
+const clean = s => s.replace(/[^0-9Xx]/g, '').toUpperCase();
+function isbn13Valid(s) {
+  if (!/^\d{13}$/.test(s)) return false;
+  const sum = [...s].reduce((a, c, i) => a + +c * (i % 2 ? 3 : 1), 0);
+  return sum % 10 === 0;
+}
+function isbn10Valid(s) {
+  if (!/^\d{9}[\dX]$/.test(s)) return false;
+  const sum = [...s].reduce((a, c, i) => a + (c === 'X' ? 10 : +c) * (10 - i), 0);
+  return sum % 11 === 0;
+}
+function to13(s) {
+  if (s.length === 13) return s;
+  const b = '978' + s.slice(0, 9);
+  const sum = [...b].reduce((a, c, i) => a + +c * (i % 2 ? 3 : 1), 0);
+  return b + ((10 - sum % 10) % 10);
+}
+function to10(s13) {
+  if (!s13.startsWith('978')) return null;
+  const b = s13.slice(3, 12);
+  const sum = [...b].reduce((a, c, i) => a + +c * (10 - i), 0);
+  const c = (11 - sum % 11) % 11;
+  return b + (c === 10 ? 'X' : c);
+}
+function amazonUrl(isbn13) {
+  const i10 = to10(isbn13);
+  return i10 ? `https://${AMAZON_DOMAIN}/dp/${i10}` : `https://${AMAZON_DOMAIN}/s?k=${isbn13}`;
+}
+
+// ---------- lookup ----------
+const j = async u => { const r = await fetch(u); if (!r.ok) throw new Error(r.status); return r.json(); };
+
+async function lookup(isbn13) {
+  const [ol, gb] = await Promise.allSettled([
+    j(`https://openlibrary.org/search.json?q=isbn:${isbn13}&fields=title,author_name,first_publish_year,subject&limit=1`),
+    j(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn13}&maxResults=1`),
+  ]);
+  const o = ol.status === 'fulfilled' ? ol.value.docs?.[0] : null;
+  const g = gb.status === 'fulfilled' ? gb.value.items?.[0]?.volumeInfo : null;
+  if (!o && !g) return null;
+
+  // Google categories look like "Fiction / Science Fiction / General" or "Fiction"
+  const gcats = (g?.categories || []).flatMap(c => c.split('/').map(s => s.trim())).filter(Boolean);
+  const category = gcats[0] || '';
+  const subcategory = gcats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '';
+  const tagSet = new Map();
+  [...gcats, ...(o?.subject || []).slice(0, 15)].forEach(t => {
+    t = t.replace(/;/g, ',').trim();
+    if (t && !tagSet.has(t.toLowerCase())) tagSet.set(t.toLowerCase(), t);
+  });
+
+  return {
+    isbn: isbn13,
+    title: [o?.title || g?.title, g?.subtitle && !o ? g.subtitle : ''].filter(Boolean).join(': '),
+    author: (o?.author_name || g?.authors || []).join(', '),
+    published: o?.first_publish_year ? String(o.first_publish_year) : (g?.publishedDate || ''),
+    category,
+    subcategory,
+    tags: [...tagSet.values()].slice(0, 20).join(';'),
+    amazon: amazonUrl(isbn13),
+    added: new Date().toISOString(),
+  };
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function say(msg, err) { $('status').textContent = msg; $('status').className = err ? 'err' : ''; }
+
+async function handleIsbn(raw) {
+  const s = clean(raw);
+  if (!(isbn13Valid(s) || isbn10Valid(s))) return say(`"${raw}" isn't a valid ISBN.`, true);
+  const isbn = to13(s);
+  if (await getBook(isbn)) return say(`Already in your library (${isbn}).`);
+  say(`Looking up ${isbn}…`);
+  try {
+    const book = await lookup(isbn);
+    if (!book) {
+      await putBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
+      say(`No match for ${isbn}. Added a blank row — fill it in by hand.`, true);
+    } else {
+      await putBook(book);
+      say(`Added: ${book.title} — ${book.author}`);
+    }
+    render();
+  } catch (e) { say('Lookup failed: ' + e.message, true); }
+}
+
+async function render() {
+  const q = $('filter').value.toLowerCase();
+  const books = (await allBooks()).sort((a, b) => b.added.localeCompare(a.added));
+  const shown = books.filter(b => !q || JSON.stringify(b).toLowerCase().includes(q));
+  $('count').textContent = `${books.length} book${books.length === 1 ? '' : 's'}`;
+  $('rows').innerHTML = shown.map(b => `<tr data-isbn="${b.isbn}">
+    ${FIELDS.map(f => `<td contenteditable data-f="${f}">${esc(b[f])}</td>`).join('')}
+    <td><a href="${esc(b.amazon)}" target="_blank" rel="noopener">View</a></td>
+    <td><button class="del" title="Delete">✕</button></td></tr>`).join('');
+}
+
+$('rows').addEventListener('focusout', async e => {
+  const td = e.target.closest('td[data-f]'); if (!td) return;
+  const isbn = td.parentElement.dataset.isbn, b = await getBook(isbn);
+  if (b && b[td.dataset.f] !== td.textContent.trim()) { b[td.dataset.f] = td.textContent.trim(); putBook(b); }
+});
+$('rows').addEventListener('click', async e => {
+  if (!e.target.classList.contains('del')) return;
+  const isbn = e.target.closest('tr').dataset.isbn;
+  if (confirm('Delete this book?')) { await delBook(isbn); render(); }
+});
+$('filter').addEventListener('input', render);
+$('addBtn').onclick = () => { handleIsbn($('isbnIn').value); $('isbnIn').value = ''; };
+$('isbnIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('addBtn').click(); });
+
+$('csvBtn').onclick = async () => {
+  const cols = ['isbn', ...FIELDS, 'amazon'];
+  const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Amazon link'];
+  const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const csv = [head, ...(await allBooks()).map(b => cols.map(c => b[c]))].map(r => r.map(cell).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' }));
+  a.download = 'books.csv'; a.click();
+};
+
+// ---------- scanner ----------
+let scanner = null, lastCode = '', lastAt = 0;
+$('scanBtn').onclick = async () => {
+  if (scanner) { await scanner.stop().catch(() => {}); scanner = null; $('reader').innerHTML = ''; $('scanBtn').textContent = 'Scan barcode'; return; }
+  scanner = new Html5Qrcode('reader', {
+    formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A],
+    experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+    verbose: false,
+  });
+  try {
+    await scanner.start({ facingMode: 'environment' },
+      { fps: 10, qrbox: { width: 300, height: 120 } },
+      code => {
+        const now = Date.now();
+        if (code === lastCode && now - lastAt < 5000) return;   // debounce repeat reads
+        lastCode = code; lastAt = now;
+        if (navigator.vibrate) navigator.vibrate(60);
+        handleIsbn(code);
+      });
+    $('scanBtn').textContent = 'Stop scanning';
+    say('Point the camera at the barcode on the back (978… / 979…).');
+  } catch (e) {
+    scanner = null;
+    say('Camera unavailable (needs HTTPS and permission): ' + e, true);
+  }
+};
+
+render();
+</script>
+</body>
+</html>
