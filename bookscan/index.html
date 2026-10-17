@@ -75,7 +75,7 @@
 </head>
 <body>
 <header>
-  <div class="bar"><h1>📚 BookScan</h1><small id="count"></small><button class="ghost" id="csvBtn">Export</button></div>
+  <div class="bar"><h1>📚 BookScan</h1><small id="count"></small><button class="ghost" id="syncBtn" aria-label="Sync settings">☁︎</button><button class="ghost" id="csvBtn">Export</button></div>
   <input id="filter" type="search" placeholder="Search your books" enterkeyhint="search">
 </header>
 
@@ -120,6 +120,85 @@ const allBooks = () => store('readonly', s => s.getAll());
 const putBook = b => store('readwrite', s => s.put(b));
 const getBook = i => store('readonly', s => s.get(i));
 const delBook = i => store('readwrite', s => s.delete(i));
+
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ---------- Google Sheets sync ----------
+// Every change is queued locally, then pushed to the Apps Script web app (see apps-script/Code.gs).
+const cfg = () => { try { return JSON.parse(localStorage.getItem('sheetCfg') || '{}'); } catch (_) { return {}; } };
+const queue = () => { try { return JSON.parse(localStorage.getItem('syncQueue') || '[]'); } catch (_) { return []; } };
+const setQueue = q => localStorage.setItem('syncQueue', JSON.stringify(q));
+const BOOK_COLS = ['isbn','title','author','published','category','subcategory','tags','amazon','added'];
+
+async function saveBook(b) { await putBook(b); setQueue([...queue(), { t:'put', book:b }]); flush(); }
+async function removeBook(isbn) { await delBook(isbn); setQueue([...queue(), { t:'del', isbn }]); flush(); }
+
+let flushing = false;
+async function flush() {
+  const { url, key } = cfg();
+  if (!url || flushing || !queue().length || !navigator.onLine) return syncStatus();
+  flushing = true;
+  const sent = queue();
+  try {
+    // text/plain avoids a CORS preflight, which Apps Script can't answer
+    const r = await fetch(url, { method:'POST', headers:{ 'Content-Type':'text/plain' }, body: JSON.stringify({ key, ops: sent }) });
+    const out = await r.json();
+    if (!out.ok) throw new Error(out.error || 'rejected');
+    setQueue(queue().slice(sent.length));
+  } catch (e) { syncStatus('Sync failed: ' + e.message, true); }
+  finally { flushing = false; syncStatus(); }
+}
+
+async function pull() {
+  const { url, key } = cfg();
+  await flush();
+  if (queue().length) throw new Error('Could not upload pending changes');
+  const r = await fetch(`${url}?key=${encodeURIComponent(key || '')}`);
+  const out = await r.json();
+  if (!out.ok) throw new Error(out.error || 'rejected');
+  for (const b of out.books) if (b.isbn) await putBook(b);   // sheet wins for books it holds
+  return out.books.length;
+}
+
+function syncStatus(msg, err) {
+  const el = $('syncMsg'); if (!el) return;
+  const n = queue().length;
+  el.textContent = msg || (cfg().url ? (n ? `${n} change${n === 1 ? '' : 's'} waiting to upload` : 'Up to date') : 'Not connected');
+  el.style.color = err ? 'var(--danger)' : 'var(--muted)';
+}
+
+function openSync() {
+  const c = cfg();
+  $('sheet').innerHTML = `<div class="grab"></div>
+    <h3 style="margin:4px 0">Google Sheets backup</h3>
+    <div id="syncMsg" style="font-size:14px"></div>
+    <label>Web app URL</label><input id="sUrl" value="${esc(c.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off">
+    <label>Secret key</label><input id="sKey" value="${esc(c.key || '')}" autocapitalize="off" autocorrect="off">
+    <div class="btns"><button class="ghost grow" id="sSave">Save</button><button class="grow" id="sSync">Sync now</button></div>`;
+  $('sheetBg').classList.add('on');
+  syncStatus();
+  const save = () => localStorage.setItem('sheetCfg', JSON.stringify({ url: $('sUrl').value.trim(), key: $('sKey').value.trim() }));
+  $('sSave').onclick = () => { save(); syncStatus(); };
+  $('sSync').onclick = async () => {
+    save();
+    if (!cfg().url) return syncStatus('Paste the web app URL first', true);
+    syncStatus('Syncing…');
+    try {
+      // first-time connect: upload everything already on this phone
+      if (!localStorage.getItem('sheetSeeded')) {
+        setQueue([...queue(), ...(await allBooks()).map(book => ({ t:'put', book }))]);
+        await flush();
+        if (!queue().length) localStorage.setItem('sheetSeeded', '1');
+      }
+      const n = await pull(); render();
+      syncStatus(`Done — ${n} books in the sheet`);
+    } catch (e) { syncStatus('Sync failed: ' + e.message, true); }
+  };
+}
+$('syncBtn').onclick = openSync;
+window.addEventListener('online', flush);
 
 // ---------- ISBN helpers ----------
 const clean = s => s.replace(/[^0-9Xx]/g, '').toUpperCase();
@@ -175,8 +254,6 @@ async function lookup(isbn13) {
 }
 
 // ---------- UI helpers ----------
-const $ = id => document.getElementById(id);
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let toastT;
 function toast(msg, err) {
   const t = $('toast'); t.textContent = msg; t.className = 'on' + (err ? ' err' : '');
@@ -194,10 +271,10 @@ async function handleIsbn(raw) {
   try {
     const book = await lookup(isbn);
     if (!book) {
-      await putBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
+      await saveBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
       toast(`No match for ${isbn} — blank row added`, true); render(); return 'blank';
     }
-    await putBook(book);
+    await saveBook(book);
     toast(`✓ ${book.title}`); render(); return 'added';
   } catch (e) { toast('Lookup failed: ' + e.message, true); return 'error'; }
 }
@@ -231,9 +308,9 @@ async function openSheet(isbn) {
   $('sheetBg').classList.add('on');
   $('saveB').onclick = async () => {
     $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
-    await putBook(b); closeSheet(); render();
+    await saveBook(b); closeSheet(); render();
   };
-  $('delB').onclick = async () => { if (confirm('Delete this book?')) { await delBook(isbn); closeSheet(); render(); } };
+  $('delB').onclick = async () => { if (confirm('Delete this book?')) { await removeBook(isbn); closeSheet(); render(); } };
 }
 const closeSheet = () => $('sheetBg').classList.remove('on');
 $('sheetBg').addEventListener('click', e => { if (e.target.id === 'sheetBg') closeSheet(); });
@@ -292,6 +369,7 @@ $('scanBtn').onclick = startScan;
 $('scanDone').onclick = stopScan;
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+flush();
 render();
 </script>
 </body>
