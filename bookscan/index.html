@@ -466,7 +466,7 @@ async function handleIsbn(raw) {
       toast(`No match for ${isbn} — blank row added`, true); render(); return 'blank';
     }
     await saveBook(book);
-    toast(`✓ ${book.title}`); render(); return 'added';
+    toast(`✓ ${book.title}`); render(); enrichLater(isbn); return 'added';
   } catch (e) {
     await saveBook(blankBook(isbn));
     toast(`Saved ${isbn} without details (${e.message}). Open it and tap Look up again later.`, true); render(); return 'blank';
@@ -489,6 +489,38 @@ async function render() {
 }
 $('filter').addEventListener('input', render);
 
+// ---------- AI suggestions ----------
+// The request goes to your Google script, which holds the Anthropic key. Only empty fields are ever filled, and Source records it.
+async function askAI(b) {
+  const { url, key } = cfg();
+  if (!url) throw new Error('Connect Google Sheets first (tap ☁︎)');
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ key, action: 'enrich',
+    book: { isbn: b.isbn, title: b.title, author: b.author, published: b.published, category: b.category, subcategory: b.subcategory, tags: b.tags, description: b.description } }) });
+  const text = await r.text();
+  let out; try { out = JSON.parse(text); } catch (_) { throw new Error(`Google replied with a web page, not data (HTTP ${r.status}). Redeploy the script as a new version.`); }
+  if (!out.ok) throw new Error(out.error || 'rejected');
+  return out.suggestion;
+}
+function applyAI(b, sg) {
+  const filled = [];
+  const set = (f, v) => { if (v && !String(b[f] || '').trim()) { b[f] = v; filled.push(f); } };
+  set('category', sg.category); set('subcategory', sg.subcategory);
+  set('tags', (sg.tags || []).join(';')); set('concepts', (sg.concepts || []).join(';')); set('description', sg.description);
+  if (filled.length) b.source = [b.source, `AI-suggested (${sg.confidence} confidence): ${filled.join(', ')}`].filter(Boolean).join(' | ');
+  return filled;
+}
+let aiChain = Promise.resolve();   // one request at a time, so a batch of scans doesn't fire a burst of API calls
+function enrichLater(isbn) {
+  aiChain = aiChain.then(async () => {
+    try {
+      const b = await getBook(isbn);
+      if (!b || !b.title || !cfg().url) return;
+      if (b.category && b.concepts && b.description && b.tags) return;
+      if (applyAI(b, await askAI(b)).length) { await saveBook(b); render(); }
+    } catch (_) { /* background step: stay quiet; the "Suggest with AI" button shows errors */ }
+  });
+}
+
 // ---------- edit sheet ----------
 async function openSheet(isbn) {
   const b = await getBook(isbn); if (!b) return;
@@ -503,6 +535,7 @@ async function openSheet(isbn) {
     </details>
     <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
     <button class="ghost" id="reB" style="width:100%;margin-top:14px">Look up again</button>
+    <button class="ghost" id="aiB" style="width:100%;margin-top:8px">Suggest with AI</button>
     <label>Not found? Search by title or author</label>
     <div style="display:flex;gap:8px"><input id="qIn" placeholder="e.g. Barth church dogmatics" enterkeyhint="search"><button id="qGo" style="min-height:48px">Search</button></div>
     <div id="qRes"></div>
@@ -527,6 +560,16 @@ async function openSheet(isbn) {
   $('qGo').onclick = doSearch;
   $('qIn').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
   $('qRes').onclick = e => { const c = e.target.closest('[data-i]'); if (!c) return; fillFrom(window._hits[+c.dataset.i]); toast('Filled in — check, then tap Save'); $('sheet').scrollTo({ top: 0, behavior: 'smooth' }); };
+  $('aiB').onclick = async () => {
+    $('aiB').textContent = 'Asking AI…';
+    try {
+      const cur = { ...b }; $('sheet').querySelectorAll('[data-f]').forEach(el => cur[el.dataset.f] = el.value.trim());
+      const sg = await askAI(cur), draft = { ...cur }, filled = applyAI(draft, sg);
+      $('sheet').querySelectorAll('[data-f]').forEach(el => { if (filled.includes(el.dataset.f) || el.dataset.f === 'source') el.value = draft[el.dataset.f]; });
+      toast(filled.length ? 'AI suggestions filled in — check them, then tap Save' : 'Nothing empty to fill');
+    } catch (e) { toast(e.message, true); }
+    $('aiB').textContent = 'Suggest with AI';
+  };
   $('reB').onclick = async () => {
     $('reB').textContent = 'Looking up…';
     try {
