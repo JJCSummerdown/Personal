@@ -33,3 +33,7 @@ After a scan, once the databases have answered, the app asks your Google script 
 Setup: Apps Script → Project Settings (gear) → Script properties → Add script property → name `ANTHROPIC_KEY`, value your key → Save; then Deploy → Manage deployments → ✏️ → Version: **New version**.
 
 Cost: one short request per book. At `claude-opus-5-5` rates (about $4 / $20 per million tokens in/out) expect roughly a penny or two per book; `claude-haiku-5-5` is around fifty times cheaper but less nuanced. Check actual spend in the Anthropic Console and set a monthly limit there.
+
+## Fill in incomplete books
+
+☁︎ → **Fill in incomplete books** re-runs the lookup and the AI step on every book that has an empty title, category, tags, concepts, description or catalogue link, oldest first. It only fills empty fields, and stops with a message if the script isn't set up (for example no `ANTHROPIC_KEY`).

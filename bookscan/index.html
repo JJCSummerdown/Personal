@@ -184,11 +184,20 @@ function openSync() {
     <label>Web app URL</label><input id="sUrl" value="${esc(c.url || '')}" placeholder="https://script.google.com/macros/s/…/exec" autocapitalize="off" autocorrect="off">
     <label>Secret key</label><input id="sKey" value="${esc(c.key || '')}" autocapitalize="off" autocorrect="off">
     <label>Google Books API key (optional — fixes "HTTP 429" lookups)</label><input id="sG" value="${esc(c.gkey || '')}" autocapitalize="off" autocorrect="off">
-    <div class="btns"><button class="ghost grow" id="sSave">Save</button><button class="grow" id="sSync">Sync now</button></div>`;
+    <div class="btns"><button class="ghost grow" id="sSave">Save</button><button class="grow" id="sSync">Sync now</button></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:18px 0 6px">
+    <button class="ghost" id="sFill" style="width:100%">Fill in incomplete books</button>
+    <div id="fillMsg" class="meta" style="color:var(--muted);font-size:14px;margin-top:8px">Re-runs the lookup and the AI step on every book with empty fields. Nothing already filled in is changed.</div>`;
   $('sheetBg').classList.add('on');
   syncStatus();
   const save = () => localStorage.setItem('sheetCfg', JSON.stringify({ url: $('sUrl').value.trim(), key: $('sKey').value.trim(), gkey: $('sG').value.trim() }));
   $('sSave').onclick = () => { save(); syncStatus(); };
+  $('sFill').onclick = async () => {
+    save();
+    $('sFill').disabled = true;
+    await refreshIncomplete(m => { const el = $('fillMsg'); if (el) el.textContent = m; });
+    const el = $('sFill'); if (el) el.disabled = false;
+  };
   $('sSync').onclick = async () => {
     save();
     if (!cfg().url) return syncStatus('Paste the web app URL first', true);
@@ -519,6 +528,39 @@ function enrichLater(isbn) {
       if (applyAI(b, await askAI(b)).length) { await saveBook(b); render(); }
     } catch (_) { /* background step: stay quiet; the "Suggest with AI" button shows errors */ }
   });
+}
+
+// ---------- fill in incomplete books ----------
+const isIncomplete = b => !b.title || !b.category || !b.tags || !b.concepts || !b.description || !b.link;
+let refreshing = false;
+async function refreshIncomplete(report) {
+  if (refreshing) return;
+  refreshing = true;
+  const todo = (await allBooks()).filter(isIncomplete).sort((a, b) => a.added.localeCompare(b.added));
+  let updated = 0, same = 0, failed = 0, stop = '';
+  try {
+    for (let i = 0; i < todo.length && !stop; i++) {
+      report(`Working on ${i + 1} of ${todo.length}…`);
+      const b = await getBook(todo[i].isbn), before = JSON.stringify(b);
+      try {
+        const f = await lookup(b.isbn).catch(() => null);          // a failed lookup still allows the AI step below
+        if (f) {
+          const hadCategory = !!b.category;
+          ['title', 'author', 'published', 'category', 'subcategory', 'tags', 'link', 'description', 'workId', 'authorId']
+            .forEach(k => { if (!String(b[k] || '').trim() && f[k]) b[k] = f[k]; });
+          if (!hadCategory && b.category && f.source) b.source = [b.source, f.source].filter(Boolean).join(' | ');
+        }
+        if (!b.link) b.link = worldcatUrl(b.isbn);
+        if (b.title && cfg().url) {
+          try { applyAI(b, await askAI(b)); }
+          catch (e) { if (/ANTHROPIC_KEY|bad key|web page|Connect Google/.test(e.message)) stop = e.message; }   // setup problems: stop and say so
+        }
+        if (JSON.stringify(b) !== before) { await saveBook(b); updated++; } else same++;
+      } catch (_) { failed++; }
+      await new Promise(r => setTimeout(r, 400));     // be gentle with the free lookup services
+    }
+  } finally { refreshing = false; render(); }
+  report(stop ? `Stopped: ${stop}` : todo.length ? `Done — ${updated} updated, ${same} unchanged, ${failed} failed` : 'Every book is already complete.');
 }
 
 // ---------- edit sheet ----------
