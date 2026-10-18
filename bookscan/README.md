@@ -37,3 +37,7 @@ Cost: one short request per book. At `claude-opus-5-5` rates (about $4 / $20 per
 ## Fill in incomplete books
 
 ☁︎ → **Fill in incomplete books** re-runs the lookup and the AI step on every book that has an empty title, category, tags, concepts, description or catalogue link, oldest first. It only fills empty fields, and stops with a message if the script isn't set up (for example no `ANTHROPIC_KEY`).
+
+## Explore
+
+On the list, tap a **concept** (green), **tag** (grey), **author** or **category** (underlined) to filter to every book that shares it; the banner under the search box shows what you are filtering by and clears it. Tapping elsewhere on a card opens the book. In a book's edit screen, *Explore from this book* repeats those chips and *Related books* ranks the other books by what they share: same author (most), then shared concepts, subcategory, tags and category, with the reason shown.

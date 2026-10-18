@@ -39,6 +39,16 @@
   .book .meta { color:var(--muted); font-size:14px; }
   .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
   .chip { font-size:12px; padding:2px 9px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .chip.concept { border-color:var(--accent); color:var(--accent); }
+  .facet { cursor:pointer; }
+  .facet:active { opacity:.6; }
+  .meta .facet { text-decoration:underline; text-decoration-color:var(--line); text-underline-offset:3px; }
+  #facetBar { display:none; align-items:center; gap:8px; margin-top:8px; padding:8px 12px; border-radius:12px; background:var(--card); border:1px solid var(--accent); font-size:14px; }
+  #facetBar.on { display:flex; }
+  #facetBar span { flex:1; }
+  #facetBar button { min-height:32px; padding:0 12px; }
+  .rel { margin-top:8px; }
+  .rel .why { color:var(--muted); font-size:12px; margin-top:2px; }
   .empty { text-align:center; color:var(--muted); margin-top:64px; padding:0 24px; }
 
   #dock { position:fixed; left:0; right:0; bottom:0; padding:12px 14px calc(12px + var(--bot)); display:flex; gap:10px;
@@ -78,6 +88,7 @@
 <header>
   <div class="bar"><h1>📚 BookScan</h1><small id="count"></small><button class="ghost" id="syncBtn" aria-label="Sync settings">☁︎</button><button class="ghost" id="csvBtn">Export</button></div>
   <input id="filter" type="search" placeholder="Search your books" enterkeyhint="search">
+  <div id="facetBar"><span id="facetTxt"></span><button class="ghost" id="facetClear">Clear ✕</button></div>
 </header>
 
 <div id="list"></div>
@@ -482,20 +493,40 @@ async function handleIsbn(raw) {
   }
 }
 
+// ---------- explore: tap a tag, concept, author or category to see every book that shares it ----------
+const splitList = v => String(v || '').split(';').map(x => x.trim()).filter(Boolean);
+const authorsOf = b => String(b.author || '').split(/,|&| and /).map(x => x.trim()).filter(Boolean);
+const lc = v => String(v).toLowerCase();
+const FACET_LABEL = { tag: 'Tag', concept: 'Concept', author: 'Author', category: 'Category' };
+let facet = null;   // { type, value } while the list is filtered by one of the above
+
+function facetMatch(b, f) {
+  const v = lc(f.value);
+  if (f.type === 'tag') return splitList(b.tags).some(t => lc(t) === v);
+  if (f.type === 'concept') return splitList(b.concepts).some(t => lc(t) === v);
+  if (f.type === 'author') return authorsOf(b).some(a => lc(a) === v);
+  return lc(b.category || '') === v || lc(b.subcategory || '') === v;
+}
+const fct = (type, value, label, cls = '') => `<span class="facet ${cls}" data-facet="${type}" data-value="${esc(value)}">${esc(label ?? value)}</span>`;
+function setFacet(f) { facet = f; $('filter').value = ''; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+
 async function render() {
   const q = $('filter').value.toLowerCase();
   const books = (await allBooks()).sort((a, b) => b.added.localeCompare(a.added));
-  const shown = books.filter(b => !q || JSON.stringify(b).toLowerCase().includes(q));
+  const shown = books.filter(b => (!q || JSON.stringify(b).toLowerCase().includes(q)) && (!facet || facetMatch(b, facet)));
   $('count').textContent = books.length ? `${books.length}` : '';
+  $('facetBar').classList.toggle('on', !!facet);
+  if (facet) $('facetTxt').textContent = `${FACET_LABEL[facet.type]}: ${facet.value} · ${shown.length} book${shown.length === 1 ? '' : 's'}`;
   $('list').innerHTML = shown.length ? shown.map(b => `
     <div class="book" data-isbn="${b.isbn}">
       <h3>${esc(b.title) || '<i>Untitled — tap to fill in</i>'}</h3>
-      <div class="meta">${esc(b.author)}${b.published ? ' · ' + esc(b.published) : ''}</div>
-      <div class="meta">${[b.category, b.subcategory].filter(Boolean).map(esc).join(' › ')}</div>
-      ${b.tags ? `<div class="chips">${b.tags.split(';').slice(0, 5).map(t => `<span class="chip">${esc(t)}</span>`).join('')}</div>` : ''}
+      <div class="meta">${authorsOf(b).map(a => fct('author', a)).join(', ')}${b.published ? ' · ' + esc(b.published) : ''}</div>
+      <div class="meta">${[b.category, b.subcategory].filter(Boolean).map(c => fct('category', c)).join(' › ')}</div>
+      ${b.concepts || b.tags ? `<div class="chips">${splitList(b.concepts).slice(0, 3).map(t => fct('concept', t, null, 'chip concept')).join('')}${splitList(b.tags).slice(0, 4).map(t => fct('tag', t, null, 'chip')).join('')}</div>` : ''}
     </div>`).join('')
     : `<div class="empty">${books.length ? 'No matches.' : 'No books yet.<br>Tap <b>Scan books</b> and point your camera at a barcode.'}</div>`;
 }
+$('facetClear').onclick = () => { facet = null; render(); };
 $('filter').addEventListener('input', render);
 
 // ---------- AI suggestions ----------
@@ -563,6 +594,28 @@ async function refreshIncomplete(report) {
   report(stop ? `Stopped: ${stop}` : todo.length ? `Done — ${updated} updated, ${same} unchanged, ${failed} failed` : 'Every book is already complete.');
 }
 
+// Related books: score by what is shared. Same author counts most, then concepts, then subcategory, tags, category.
+function relatedScore(a, b) {
+  const why = [];
+  let score = 0;
+  const shared = (x, y) => x.filter(v => y.some(w => lc(w) === lc(v)));
+  const au = shared(authorsOf(a), authorsOf(b)); if (au.length) { score += 5 * au.length; why.push('same author'); }
+  const co = shared(splitList(a.concepts), splitList(b.concepts)); if (co.length) { score += 3 * co.length; why.push(co.length > 1 ? `${co.length} shared concepts` : `concept: ${co[0]}`); }
+  if (a.subcategory && lc(a.subcategory) === lc(b.subcategory || '')) { score += 2; why.push(a.subcategory); }
+  const tg = shared(splitList(a.tags), splitList(b.tags)); if (tg.length) { score += tg.length; why.push(tg.length > 1 ? `${tg.length} shared tags` : `tag: ${tg[0]}`); }
+  if (a.category && lc(a.category) === lc(b.category || '') && !(a.subcategory && lc(a.subcategory) === lc(b.subcategory || ''))) { score += 1; why.push(a.category); }
+  return { score, why };
+}
+async function showRelated(b) {
+  const out = (await allBooks()).filter(o => o.isbn !== b.isbn).map(o => ({ o, ...relatedScore(b, o) }))
+    .filter(r => r.score > 0).sort((x, y) => y.score - x.score).slice(0, 8);
+  const el = $('related'); if (!el) return;
+  el.innerHTML = out.length ? out.map(r => `<div class="book" data-isbn="${r.o.isbn}" style="margin-bottom:8px">
+      <h3 style="font-size:15px">${esc(r.o.title) || '<i>Untitled</i>'}</h3><div class="meta">${esc(r.o.author)}</div><div class="why">${esc(r.why.join(' · '))}</div></div>`).join('')
+    : '<span class="meta">No other book shares anything with this one yet.</span>';
+  el.onclick = e => { const c = e.target.closest('.book'); if (c) openSheet(c.dataset.isbn); };
+}
+
 // ---------- edit sheet ----------
 async function openSheet(isbn) {
   const b = await getBook(isbn); if (!b) return;
@@ -572,6 +625,11 @@ async function openSheet(isbn) {
       : `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
     <p style="margin:14px 0 0"><a href="${esc(b.link || worldcatUrl(b.isbn))}" target="_blank" rel="noopener">Open catalogue record ↗</a>
     &nbsp;·&nbsp; <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Amazon ↗</a></p>
+    <label>Explore from this book</label>
+    <div class="chips" style="margin-top:0">${[...authorsOf(b).map(a => fct('author', a, null, 'chip')), ...[b.category, b.subcategory].filter(Boolean).map(c => fct('category', c, null, 'chip')),
+      ...splitList(b.concepts).map(t => fct('concept', t, null, 'chip concept')), ...splitList(b.tags).map(t => fct('tag', t, null, 'chip'))].join('') || '<span class="meta">Nothing to explore yet — add tags or concepts.</span>'}</div>
+    <label>Related books</label>
+    <div id="related" class="rel"><span class="meta">Looking…</span></div>
     <details style="margin-top:10px"><summary class="meta" style="cursor:pointer">More details</summary>
       ${FIELDS_MORE.map(([f, l]) => `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
     </details>
@@ -583,6 +641,8 @@ async function openSheet(isbn) {
     <div id="qRes"></div>
     <div class="btns"><button class="danger" id="delB">Delete</button><button class="grow" id="saveB">Save</button></div>`;
   $('sheetBg').classList.add('on');
+  showRelated(b);
+  $('sheet').querySelectorAll('.chips [data-facet]').forEach(el => el.onclick = () => { closeSheet(); setFacet({ type: el.dataset.facet, value: el.dataset.value }); });
   $('saveB').onclick = async () => {
     $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
     await saveBook(b); closeSheet(); render();
@@ -625,7 +685,11 @@ async function openSheet(isbn) {
 }
 const closeSheet = () => $('sheetBg').classList.remove('on');
 $('sheetBg').addEventListener('click', e => { if (e.target.id === 'sheetBg') closeSheet(); });
-$('list').addEventListener('click', e => { const c = e.target.closest('.book'); if (c) openSheet(c.dataset.isbn); });
+$('list').addEventListener('click', e => {
+  const f = e.target.closest('[data-facet]');
+  if (f) return setFacet({ type: f.dataset.facet, value: f.dataset.value });
+  const c = e.target.closest('.book'); if (c) openSheet(c.dataset.isbn);
+});
 
 // ---------- manual entry ----------
 $('typeBtn').onclick = () => {
