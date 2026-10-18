@@ -25,3 +25,11 @@ Changes upload automatically (and queue while offline). *Sync now* also pulls th
 ## Scanner
 
 Barcodes are decoded in the browser by [zxing-wasm](https://github.com/Sec-ant/zxing-wasm) (`zxing.js` + `zxing_reader.wasm`, self-hosted, MIT licence in `ZXING-WASM-LICENSE`). The camera is opened at up to 1920x1080 and the middle strip of each frame is decoded. If live scanning struggles, *Take a photo instead* decodes a photo from the phone's own camera.
+
+## AI suggestions
+
+After a scan, once the databases have answered, the app asks your Google script to suggest anything still empty: main/sub category, tags, **key concepts** and a description. The script calls the Claude API (`MODEL` at the top of `Code.gs`); your Anthropic key is stored in the script's **Script properties** as `ANTHROPIC_KEY` and never reaches the phone or the repo. Database values are never overwritten, and the *Source* column records what the AI added and its confidence. *Suggest with AI* in a book's edit screen does the same on demand and shows any error.
+
+Setup: Apps Script → Project Settings (gear) → Script properties → Add script property → name `ANTHROPIC_KEY`, value your key → Save; then Deploy → Manage deployments → ✏️ → Version: **New version**.
+
+Cost: one short request per book. At `claude-opus-5-5` rates (about $4 / $20 per million tokens in/out) expect roughly a penny or two per book; `claude-haiku-5-5` is around fifty times cheaper but less nuanced. Check actual spend in the Anthropic Console and set a monthly limit there.

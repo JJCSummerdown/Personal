@@ -27,6 +27,67 @@ function sheet_() {
 }
 const json_ = o => ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 
+// ---------- AI suggestions ----------
+// Needs your Anthropic API key stored as a Script property named ANTHROPIC_KEY (Project Settings -> Script properties).
+// The key lives only here: it is never sent to the phone or stored in the sheet.
+const MODEL = 'claude-opus-5-5';      // for a much cheaper (and somewhat less nuanced) option use 'claude-haiku-5-5'
+const MAIN_CATEGORIES = ['General works & computing', 'Philosophy & psychology', 'Religion', 'Social sciences', 'Language',
+  'Science', 'Technology', 'Arts & recreation', 'Literature', 'History & geography'];
+const SYSTEM = 'You help catalogue a personal library of mostly academic and serious non-fiction books (theology, philosophy, history, literature, social science). ' +
+  'For each book you receive, return one short structured record. Be accurate: use what you actually know about the book. If you do not recognise it, ' +
+  'infer cautiously from the title, author and any subject headings supplied, and set confidence to "low". Never invent claims, plot or quotations. ' +
+  'Fields: category = exactly one of the allowed main categories; subcategory = a short consistent field name of 1-4 words (e.g. "Christian theology", ' +
+  '"Contemplative practice", "Political philosophy"); tags = 5-10 broad subject tags of 1-3 words, useful for browsing; ' +
+  'concepts = 4-8 specific ideas, themes, traditions or thinkers the book engages with, as short noun phrases, most specific first; ' +
+  'description = 2-3 plain sentences on what the book is about, or an empty string if a description was supplied; ' +
+  'confidence = high (you know this book), medium (you know the author and field), or low (inferring from title alone). Do not use semicolons inside any item.';
+const SCHEMA = {
+  type: 'object',
+  properties: {
+    category: { type: 'string', enum: MAIN_CATEGORIES },
+    subcategory: { type: 'string' },
+    tags: { type: 'array', items: { type: 'string' } },
+    concepts: { type: 'array', items: { type: 'string' } },
+    description: { type: 'string' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+  },
+  required: ['category', 'subcategory', 'tags', 'concepts', 'description', 'confidence'],
+  additionalProperties: false,
+};
+
+function enrich_(book) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('ANTHROPIC_KEY');
+  if (!apiKey) throw new Error('ANTHROPIC_KEY is not set in the script properties');
+  const known = {};
+  ['title', 'author', 'published', 'category', 'subcategory', 'tags', 'description'].forEach(f => { if (book[f]) known[f] = String(book[f]).slice(0, 1500); });
+  const res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    payload: JSON.stringify({
+      model: MODEL,
+      max_tokens: 2000,
+      system: SYSTEM,
+      output_config: { effort: 'low', format: { type: 'json_schema', schema: SCHEMA } },
+      messages: [{ role: 'user', content: 'Book to catalogue (what the databases already know):\n' + JSON.stringify(known) }],
+    }),
+  });
+  const code = res.getResponseCode(), text = res.getContentText();
+  if (code !== 200) throw new Error('Claude API ' + code + ': ' + text.slice(0, 300));
+  const reply = JSON.parse(text);
+  if (reply.stop_reason === 'refusal') throw new Error('Claude declined this request');
+  const out = (reply.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  const s = JSON.parse(out);
+  const clean = v => String(v || '').replace(/;/g, ',').trim();
+  return {
+    category: MAIN_CATEGORIES.indexOf(s.category) >= 0 ? s.category : '',
+    subcategory: clean(s.subcategory),
+    tags: (s.tags || []).map(clean).filter(Boolean).slice(0, 10),
+    concepts: (s.concepts || []).map(clean).filter(Boolean).slice(0, 8),
+    description: String(s.description || '').trim(),
+    confidence: ['high', 'medium', 'low'].indexOf(s.confidence) >= 0 ? s.confidence : 'low',
+  };
+}
+
 function doGet(e) {
   if (!e || !e.parameter || (e.parameter.key || '') !== KEY) return json_({ ok: false, error: 'bad key' });
   const { sh, idx, width } = sheet_(), last = sh.getLastRow();
@@ -40,11 +101,16 @@ function doGet(e) {
 }
 
 function doPost(e) {
+  let body;
+  try { body = JSON.parse(e.postData.contents); } catch (err) { return json_({ ok: false, error: 'bad request' }); }
+  if (body.key !== KEY) return json_({ ok: false, error: 'bad key' });
+  if (body.action === 'enrich') {
+    try { return json_({ ok: true, suggestion: enrich_(body.book || {}) }); }
+    catch (err) { return json_({ ok: false, error: String(err.message || err) }); }
+  }
   const lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
-    const body = JSON.parse(e.postData.contents);
-    if (body.key !== KEY) return json_({ ok: false, error: 'bad key' });
     const { sh, idx, width } = sheet_();
     const rowOf = {};
     const last = sh.getLastRow();
