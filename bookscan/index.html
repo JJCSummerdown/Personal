@@ -100,7 +100,10 @@
 <script src="zxing.js"></script>
 <script>
 const AMAZON_DOMAIN = 'www.amazon.co.uk';
-const FIELDS = [['title','Title'],['author','Author'],['published','Original publication'],['category','Main category'],['subcategory','Sub category'],['tags','Tags (separate with ;)']];
+const FIELDS = [['title','Title'],['author','Author'],['published','Original publication'],['category','Main category'],['subcategory','Sub category'],
+  ['tags','Tags (separate with ;)'],['concepts','Key concepts (separate with ;)'],['description','Description']];
+const FIELDS_MORE = [['link','Catalogue link'],['workId','Work ID (Open Library)'],['authorId','Author ID (Wikidata; Open Library)'],['source','Where the category came from']];
+const LONG_FIELDS = ['tags','concepts','description'];
 
 // ---------- storage (IndexedDB) ----------
 const db = new Promise((res, rej) => {
@@ -131,7 +134,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 const cfg = () => { try { return JSON.parse(localStorage.getItem('sheetCfg') || '{}'); } catch (_) { return {}; } };
 const queue = () => { try { return JSON.parse(localStorage.getItem('syncQueue') || '[]'); } catch (_) { return []; } };
 const setQueue = q => localStorage.setItem('syncQueue', JSON.stringify(q));
-const BOOK_COLS = ['isbn','title','author','published','category','subcategory','tags','amazon','added'];
+const BOOK_COLS = ['isbn','title','author','published','category','subcategory','tags','link','amazon','description','concepts','workId','authorId','source','added'];
 
 async function saveBook(b) { await putBook(b); setQueue([...queue(), { t:'put', book:b }]); flush(); }
 async function removeBook(isbn) { await delBook(isbn); setQueue([...queue(), { t:'del', isbn }]); flush(); }
@@ -227,6 +230,7 @@ function to10(s13) {
   const c = (11 - [...b].reduce((a, ch, i) => a + +ch * (10 - i), 0) % 11) % 11;
   return b + (c === 10 ? 'X' : c);
 }
+const worldcatUrl = i13 => `https://search.worldcat.org/search?q=bn%3A${i13}`;
 const amazonUrl = i13 => to10(i13) ? `https://${AMAZON_DOMAIN}/dp/${to10(i13)}` : `https://${AMAZON_DOMAIN}/s?k=${i13}`;
 
 // ---------- lookup ----------
@@ -246,15 +250,15 @@ const year = v => (String(v || '').match(/\d{4}/) || [''])[0];
 
 const SOURCES = [
   async isbn => {   // Open Library search: best for original publication year
-    const d = await getJson('Open Library', `https://openlibrary.org/search.json?q=isbn:${isbn}&fields=title,author_name,first_publish_year,subject,ddc&limit=1`);
+    const d = await getJson('Open Library', `https://openlibrary.org/search.json?q=isbn:${isbn}&fields=key,title,author_name,author_key,first_publish_year,subject,ddc,lcc&limit=1`);
     const o = d.docs?.[0];
-    return o && { title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc };
+    return o && { title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc, lcc: o.lcc, work: o.key, author: o.author_key?.[0] };
   },
   async isbn => {   // Open Library edition data: catches books the search index misses
     const d = await getJson('Open Library', `https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&jscmd=data&format=json`);
     const o = d[`ISBN:${isbn}`];
     return o && { title: [o.title, o.subtitle].filter(Boolean).join(': '), authors: (o.authors || []).map(a => a.name), year: year(o.publish_date),
-                  cats: [], subjects: (o.subjects || []).map(x => x.name), ddc: o.classifications?.dewey_decimal_class };
+                  cats: [], subjects: (o.subjects || []).map(x => x.name), ddc: o.classifications?.dewey_decimal_class, lcc: o.classifications?.lc_classifications };
   },
   async isbn => {   // Google Books: best for categories
     const d = await getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1${gKey()}`);
@@ -288,11 +292,26 @@ async function lookup(isbn13) {
   const recs = res.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
   const errs = [...new Set(res.filter(r => r.status === 'rejected').map(r => r.reason.message))];
   if (!recs.length) { if (errs.length) throw new Error(errs.join('; ')); return null; }
-  return merge(isbn13, recs);
+  const book = merge(isbn13, recs);
+  await enrichFromOpenLibrary(book);
+  return book;
+}
+
+// The work record holds the description; the author record links the author to Wikidata. Both are optional extras.
+async function enrichFromOpenLibrary(b) {
+  const [w, a] = await Promise.allSettled([
+    b.workId ? getJson('Open Library', `https://openlibrary.org/works/${b.workId}.json`) : null,
+    /^OL\d+A$/.test(b.authorId) ? getJson('Open Library', `https://openlibrary.org/authors/${b.authorId}.json`) : null,
+  ]);
+  const d = w.status === 'fulfilled' && w.value?.description;
+  const text = (typeof d === 'string' ? d : d?.value || '').split(/\n+-{3,}/)[0].replace(/\s*\(\[source\]\[\d+\]\)/g, '').trim();
+  if (text) b.description = text.slice(0, 1500);
+  const wd = a.status === 'fulfilled' && a.value?.remote_ids?.wikidata;
+  b.authorId = [wd, b.authorId].filter(Boolean).join(';');
 }
 
 // Dewey Decimal: main class (hundreds) and division (tens). Used when Google Books gives no categories.
-const DDC_MAIN = { 0:'Computer science, information & general works', 1:'Philosophy & psychology', 2:'Religion', 3:'Social sciences', 4:'Language',
+const DDC_MAIN = { 0:'General works & computing', 1:'Philosophy & psychology', 2:'Religion', 3:'Social sciences', 4:'Language',
   5:'Science', 6:'Technology', 7:'Arts & recreation', 8:'Literature', 9:'History & geography' };
 const DDC_DIV = { 0:'General works',10:'Bibliography',20:'Library & information sciences',30:'Encyclopedias',50:'Serials',60:'Organizations & museums',70:'Journalism & publishing',80:'General collections',90:'Manuscripts & rare books',
   100:'Philosophy',110:'Metaphysics',120:'Epistemology',130:'Parapsychology & occultism',140:'Philosophical schools',150:'Psychology',160:'Logic',170:'Ethics',180:'Ancient, medieval & eastern philosophy',190:'Modern western philosophy',
@@ -320,10 +339,74 @@ function ddcCats(list) {
 const JUNK_TAG = /^(accessible book|protected daisy|in library|lending library|overdrive|internet archive wishlist|large type books|open library staff picks|reading level-.*|general)$/i;
 const goodTag = t => !/[:_]/.test(t) && !JUNK_TAG.test(t) && t.length < 60;
 
+// Library of Congress classification (LCC) letters -> our categories (same main names as the Dewey table, so the taxonomy stays consistent)
+const LCC = {};
+[['A','General works',''],['Z','General works','Bibliography & libraries'],
+ ['B','Philosophy & psychology','Philosophy'],['BC','Philosophy & psychology','Logic'],['BD','Philosophy & psychology','Metaphysics & epistemology'],['BF','Philosophy & psychology','Psychology'],
+ ['BH','Philosophy & psychology','Aesthetics'],['BJ','Philosophy & psychology','Ethics'],
+ ['BL','Religion','Religions & mythology'],['BM','Religion','Judaism'],['BP','Religion','Islam & other religions'],['BQ','Religion','Buddhism'],['BR','Religion','Christianity'],
+ ['BS','Religion','Bible'],['BT','Religion','Doctrinal theology'],['BV','Religion','Practical theology'],['BX','Religion','Christian denominations'],
+ ['C','History & geography','Auxiliary sciences of history'],['CT','History & geography','Biography'],['D','History & geography','World history'],['DA','History & geography','History of Britain'],
+ ['DB','History & geography','History of Central Europe'],['DC','History & geography','History of France'],['DD','History & geography','History of Germany'],['DE','History & geography','Classical world'],
+ ['DF','History & geography','History of Greece'],['DG','History & geography','History of Italy'],['DK','History & geography','History of Russia & Eastern Europe'],['DP','History & geography','History of Spain & Portugal'],
+ ['DS','History & geography','History of Asia'],['DT','History & geography','History of Africa'],['E','History & geography','History of the United States'],['F','History & geography','History of the Americas'],
+ ['G','History & geography','Geography'],['GN','Social sciences','Anthropology'],['GR','Social sciences','Customs & folklore'],['GT','Social sciences','Customs & folklore'],['GV','Arts & recreation','Recreation & sport'],
+ ['H','Social sciences','Social sciences'],['HA','Social sciences','Statistics'],['HB','Social sciences','Economics'],['HC','Social sciences','Economics'],['HD','Social sciences','Economics'],
+ ['HF','Social sciences','Commerce'],['HG','Social sciences','Finance'],['HM','Social sciences','Sociology'],['HN','Social sciences','Social history'],['HQ','Social sciences','Family & gender'],
+ ['HT','Social sciences','Communities & social structure'],['HV','Social sciences','Social problems & welfare'],['HX','Social sciences','Socialism'],
+ ['J','Social sciences','Political science'],['JC','Social sciences','Political theory'],['JX','Social sciences','International relations'],['JZ','Social sciences','International relations'],
+ ['K','Social sciences','Law'],['L','Social sciences','Education'],['U','Social sciences','Military science'],['V','Social sciences','Naval science'],
+ ['M','Arts & recreation','Music'],['N','Arts & recreation','Arts'],['NA','Arts & recreation','Architecture'],['NB','Arts & recreation','Sculpture'],['ND','Arts & recreation','Painting'],
+ ['P','Language','Philology & linguistics'],['PA','Language','Classical languages'],['PE','Language','English language'],['PN','Literature','Literature (general)'],
+ ['PQ','Literature','French, Italian & Spanish literature'],['PR','Literature','English literature'],['PS','Literature','American literature'],['PT','Literature','German & Nordic literature'],['PZ','Literature','Fiction & juvenile literature'],
+ ['Q','Science','Science'],['QA','Science','Mathematics'],['QB','Science','Astronomy'],['QC','Science','Physics'],['QD','Science','Chemistry'],['QE','Science','Earth sciences'],
+ ['QH','Science','Biology'],['QK','Science','Plants'],['QL','Science','Animals'],['QP','Science','Physiology'],
+ ['R','Technology','Medicine & health'],['S','Technology','Agriculture'],['T','Technology','Engineering & technology'],
+].forEach(([k, main, sub]) => LCC[k] = [main, sub]);
+
+// most common class across the editions' LCC numbers ("PR-6068.00000000.O93 H38", "PZ7.R79835")
+function lccCats(list) {
+  const counts = new Map();
+  for (const l of list || []) {
+    const letters = (String(l).match(/^[A-Z]{1,3}/) || [''])[0];
+    const key = [letters, letters.slice(0, 2), letters.slice(0, 1)].find(k => k && LCC[k]);   // longest known prefix
+    if (key) counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  if (!counts.size) return [];
+  const key = [...counts.entries()].reduce((best, e) => e[1] > best[1] ? e : best)[0];
+  return LCC[key].filter(Boolean);
+}
+
+// last resort when no classification exists anywhere: guess from the subject headings (flagged "check this" in the Source column)
+const KEYWORD_RULES = [
+  [/theolog|christian|bible|biblical|church|religio|spiritual|mystic|prayer|jewish|islam|buddhis/i, 'Religion', 'Theology & spirituality'],
+  [/philosoph|metaphysic|epistemolog|phenomenolog|existential/i, 'Philosophy & psychology', 'Philosophy'],
+  [/psycholog|psychoanaly|psychotherap/i, 'Philosophy & psychology', 'Psychology'],
+  [/ethic|moral/i, 'Philosophy & psychology', 'Ethics'],
+  [/politic|government|democra|prime minister/i, 'Social sciences', 'Political science'],
+  [/econom|capitalis|financ/i, 'Social sciences', 'Economics'],
+  [/sociolog|social/i, 'Social sciences', 'Sociology'],
+  [/histor|biograph|empire/i, 'History & geography', 'History'],
+  [/poetry|poems|literary|literature|novel|fiction|stories/i, 'Literature', 'Literature'],
+  [/music|painting|architecture/i, 'Arts & recreation', 'Arts'],
+  [/science|physics|biology|mathemat/i, 'Science', 'Science'],
+];
+function keywordCats(subjects) {
+  const scores = KEYWORD_RULES.map(([re, main, sub]) => [subjects.filter(t => re.test(t)).length, main, sub]);
+  const best = scores.reduce((b, e) => e[0] > b[0] ? e : b, [0]);
+  return best[0] ? [best[1], best[2]] : [];
+}
+
+const blankBook = isbn => ({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', link: worldcatUrl(isbn), amazon: amazonUrl(isbn),
+  description:'', concepts:'', workId:'', authorId:'', source:'', added: new Date().toISOString() });
+
 function merge(isbn13, recs) {
   const first = f => recs.map(f).find(v => v && String(v).length) || '';
-  let cats = recs.flatMap(r => r.cats);
-  if (!cats.length) cats = ddcCats(recs.flatMap(r => r.ddc || []));
+  const subjectsAll = recs.flatMap(r => r.subjects || []);
+  let cats = recs.flatMap(r => r.cats), src = cats.length ? 'Google Books' : '';
+  if (!cats.length) { cats = ddcCats(recs.flatMap(r => r.ddc || [])); if (cats.length) src = 'Dewey class'; }
+  if (!cats.length) { cats = lccCats(recs.flatMap(r => r.lcc || [])); if (cats.length) src = 'Library of Congress class'; }
+  if (!cats.length) { cats = keywordCats(subjectsAll); if (cats.length) src = 'Subject keywords (check this)'; }
   const tagSet = new Map();
   [...cats, ...recs.flatMap(r => r.subjects.slice(0, 15))].forEach(t => {
     t = String(t).replace(/;/g, ',').trim();
@@ -337,7 +420,12 @@ function merge(isbn13, recs) {
     category: cats[0] || '',
     subcategory: cats.find((c, i) => i > 0 && c.toLowerCase() !== 'general') || '',
     tags: [...tagSet.values()].slice(0, 20).join(';'),
+    link: first(r => r.work) ? `https://openlibrary.org${first(r => r.work)}` : worldcatUrl(isbn13),
     amazon: amazonUrl(isbn13),
+    description: '', concepts: '',
+    workId: (first(r => r.work) || '').replace('/works/', ''),
+    authorId: first(r => r.author),
+    source: src ? `Category: ${src}` : '',
     added: new Date().toISOString(),
   };
 }
@@ -346,8 +434,8 @@ function merge(isbn13, recs) {
 async function searchTitles(q) {
   const enc = encodeURIComponent(q);
   const res = await Promise.allSettled([
-    getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=title,author_name,first_publish_year,subject,ddc`)
-      .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc }))),
+    getJson('Open Library', `https://openlibrary.org/search.json?q=${enc}&limit=8&fields=key,title,author_name,author_key,first_publish_year,subject,ddc,lcc`)
+      .then(d => (d.docs || []).map(o => ({ title: o.title, authors: o.author_name || [], year: o.first_publish_year, cats: [], subjects: o.subject || [], ddc: o.ddc, lcc: o.lcc, work: o.key, author: o.author_key?.[0] }))),
     getJson('Google Books', `https://www.googleapis.com/books/v1/volumes?q=${enc}&maxResults=8&printType=books${gKey()}`)
       .then(d => (d.items || []).map(i => gRec(i.volumeInfo))),
   ]);
@@ -374,13 +462,13 @@ async function handleIsbn(raw) {
   try {
     const book = await lookup(isbn);
     if (!book) {
-      await saveBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
+      await saveBook(blankBook(isbn));
       toast(`No match for ${isbn} — blank row added`, true); render(); return 'blank';
     }
     await saveBook(book);
     toast(`✓ ${book.title}`); render(); return 'added';
   } catch (e) {
-    await saveBook({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', amazon: amazonUrl(isbn), added: new Date().toISOString() });
+    await saveBook(blankBook(isbn));
     toast(`Saved ${isbn} without details (${e.message}). Open it and tap Look up again later.`, true); render(); return 'blank';
   }
 }
@@ -405,10 +493,14 @@ $('filter').addEventListener('input', render);
 async function openSheet(isbn) {
   const b = await getBook(isbn); if (!b) return;
   $('sheet').innerHTML = `<div class="grab"></div>
-    ${FIELDS.map(([f, l]) => f === 'tags'
+    ${FIELDS.map(([f, l]) => LONG_FIELDS.includes(f)
       ? `<label>${l}</label><textarea data-f="${f}">${esc(b[f])}</textarea>`
       : `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
-    <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Open on Amazon ↗</a>
+    <p style="margin:14px 0 0"><a href="${esc(b.link || worldcatUrl(b.isbn))}" target="_blank" rel="noopener">Open catalogue record ↗</a>
+    &nbsp;·&nbsp; <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Amazon ↗</a></p>
+    <details style="margin-top:10px"><summary class="meta" style="cursor:pointer">More details</summary>
+      ${FIELDS_MORE.map(([f, l]) => `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
+    </details>
     <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
     <button class="ghost" id="reB" style="width:100%;margin-top:14px">Look up again</button>
     <label>Not found? Search by title or author</label>
@@ -458,8 +550,8 @@ $('typeBtn').onclick = () => {
 
 // ---------- CSV export ----------
 $('csvBtn').onclick = async () => {
-  const cols = ['isbn', 'title', 'author', 'published', 'category', 'subcategory', 'tags', 'amazon'];
-  const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Amazon link'];
+  const cols = BOOK_COLS;
+  const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Catalogue link','Amazon link','Description','Key concepts','Work ID','Author ID','Source','Added'];
   const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const csv = [head, ...(await allBooks()).map(b => cols.map(c => b[c]))].map(r => r.map(cell).join(',')).join('\r\n');
   const file = new File(['﻿' + csv], 'books.csv', { type: 'text/csv' });
