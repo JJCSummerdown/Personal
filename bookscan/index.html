@@ -47,6 +47,8 @@
   #facetBar.on { display:flex; }
   #facetBar span { flex:1; }
   #facetBar button { min-height:32px; padding:0 12px; }
+  .loan { color:var(--accent); font-weight:600; }
+  #loanBtn { display:none; margin-top:8px; min-height:36px; padding:0 14px; font-size:14px; }
   .rel { margin-top:8px; }
   .rel .why { color:var(--muted); font-size:12px; margin-top:2px; }
   .empty { text-align:center; color:var(--muted); margin-top:64px; padding:0 24px; }
@@ -88,6 +90,7 @@
 <header>
   <div class="bar"><h1>📚 BookScan</h1><small id="count"></small><button class="ghost" id="syncBtn" aria-label="Sync settings">☁︎</button><button class="ghost" id="csvBtn">Export</button></div>
   <input id="filter" type="search" placeholder="Search your books" enterkeyhint="search">
+  <button class="ghost" id="loanBtn"></button>
   <div id="facetBar"><span id="facetTxt"></span><button class="ghost" id="facetClear">Clear ✕</button></div>
 </header>
 
@@ -95,6 +98,7 @@
 
 <div id="dock">
   <button class="ghost" id="typeBtn" aria-label="Enter ISBN manually">⌨︎</button>
+  <button class="ghost" id="lendBtn" aria-label="Lend or return books">🤝 Lend</button>
   <button id="scanBtn">📷 Scan books</button>
 </div>
 
@@ -102,7 +106,7 @@
   <div id="scanTop"><strong id="scanCount">0 added</strong><button id="scanDone">Done</button></div>
   <div id="reader"><video id="cam" playsinline muted autoplay></video></div>
   <div id="aim"></div>
-  <div id="scanHint">Hold the barcode inside the box and keep it steady. Scans keep running — tap Done when finished.<br><button id="photoBtn" type="button" style="margin-top:10px;background:#fff3;color:#fff;min-height:44px">Not reading? Take a photo instead</button><input id="photoIn" type="file" accept="image/*" capture="environment" hidden></div>
+  <div id="scanHint"><span id="scanHintTxt"></span><br><button id="photoBtn" type="button" style="margin-top:10px;background:#fff3;color:#fff;min-height:44px">Not reading? Take a photo instead</button><input id="photoIn" type="file" accept="image/*" capture="environment" hidden></div>
 </div>
 
 <div id="sheetBg"><div id="sheet"></div></div>
@@ -113,7 +117,7 @@
 const AMAZON_DOMAIN = 'www.amazon.co.uk';
 const FIELDS = [['title','Title'],['author','Author'],['published','Original publication'],['category','Main category'],['subcategory','Sub category'],
   ['tags','Tags (separate with ;)'],['concepts','Key concepts (separate with ;)'],['description','Description']];
-const FIELDS_MORE = [['link','Catalogue link'],['workId','Work ID (Open Library)'],['authorId','Author ID (Wikidata; Open Library)'],['source','Where the category came from']];
+const FIELDS_MORE = [['link','Catalogue link'],['workId','Work ID (Open Library)'],['authorId','Author ID (Wikidata; Open Library)'],['source','Where the category came from'],['loanLog','Loan history']];
 const LONG_FIELDS = ['tags','concepts','description'];
 
 // ---------- storage (IndexedDB) ----------
@@ -145,7 +149,7 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;
 const cfg = () => { try { return JSON.parse(localStorage.getItem('sheetCfg') || '{}'); } catch (_) { return {}; } };
 const queue = () => { try { return JSON.parse(localStorage.getItem('syncQueue') || '[]'); } catch (_) { return []; } };
 const setQueue = q => localStorage.setItem('syncQueue', JSON.stringify(q));
-const BOOK_COLS = ['isbn','title','author','published','category','subcategory','tags','link','amazon','description','concepts','workId','authorId','source','added'];
+const BOOK_COLS = ['isbn','title','author','published','category','subcategory','tags','link','amazon','description','concepts','workId','authorId','source','added','lentTo','lentOn','loanLog'];
 
 async function saveBook(b) { await putBook(b); setQueue([...queue(), { t:'put', book:b }]); flush(); }
 async function removeBook(isbn) { await delBook(isbn); setQueue([...queue(), { t:'del', isbn }]); flush(); }
@@ -176,7 +180,7 @@ async function pull() {
   const text = await r.text();
   let out; try { out = JSON.parse(text); } catch (_) { throw new Error(`Google replied with a web page, not data (HTTP ${r.status}). Check the deployment is "Anyone" and the URL ends /exec.`); }
   if (!out.ok) throw new Error(out.error || 'rejected');
-  for (const b of out.books) if (b.isbn) await putBook(b);   // sheet wins for books it holds
+  for (const b of out.books) if (b.isbn) await putBook({ ...(await getBook(b.isbn)), ...b });   // sheet wins for books it holds; fields an older script doesn't return stay as they are
   return out.books.length;
 }
 
@@ -418,7 +422,7 @@ function keywordCats(subjects) {
 }
 
 const blankBook = isbn => ({ isbn, title:'', author:'', published:'', category:'', subcategory:'', tags:'', link: worldcatUrl(isbn), amazon: amazonUrl(isbn),
-  description:'', concepts:'', workId:'', authorId:'', source:'', added: new Date().toISOString() });
+  description:'', concepts:'', workId:'', authorId:'', source:'', added: new Date().toISOString(), lentTo:'', lentOn:'', loanLog:'' });
 
 function merge(isbn13, recs) {
   const first = f => recs.map(f).find(v => v && String(v).length) || '';
@@ -497,7 +501,7 @@ async function handleIsbn(raw) {
 const splitList = v => String(v || '').split(';').map(x => x.trim()).filter(Boolean);
 const authorsOf = b => String(b.author || '').split(/,|&| and /).map(x => x.trim()).filter(Boolean);
 const lc = v => String(v).toLowerCase();
-const FACET_LABEL = { tag: 'Tag', concept: 'Concept', author: 'Author', category: 'Category' };
+const FACET_LABEL = { tag: 'Tag', concept: 'Concept', author: 'Author', category: 'Category', loan: 'Showing', borrower: 'Lent to' };
 let facet = null;   // { type, value } while the list is filtered by one of the above
 
 function facetMatch(b, f) {
@@ -505,6 +509,8 @@ function facetMatch(b, f) {
   if (f.type === 'tag') return splitList(b.tags).some(t => lc(t) === v);
   if (f.type === 'concept') return splitList(b.concepts).some(t => lc(t) === v);
   if (f.type === 'author') return authorsOf(b).some(a => lc(a) === v);
+  if (f.type === 'loan') return !!b.lentTo;
+  if (f.type === 'borrower') return lc(b.lentTo || '') === v;
   return lc(b.category || '') === v || lc(b.subcategory || '') === v;
 }
 const fct = (type, value, label, cls = '') => `<span class="facet ${cls}" data-facet="${type}" data-value="${esc(value)}">${esc(label ?? value)}</span>`;
@@ -514,6 +520,9 @@ async function render() {
   const q = $('filter').value.toLowerCase();
   const books = (await allBooks()).sort((a, b) => b.added.localeCompare(a.added));
   const shown = books.filter(b => (!q || JSON.stringify(b).toLowerCase().includes(q)) && (!facet || facetMatch(b, facet)));
+  if (facet && (facet.type === 'loan' || facet.type === 'borrower')) shown.sort((a, b) => (a.lentOn || '').localeCompare(b.lentOn || ''));   // longest-standing loan first
+  const out = books.filter(b => b.lentTo).length;
+  $('loanBtn').textContent = `📖 ${out} on loan`; $('loanBtn').style.display = out && !facet ? 'block' : 'none';
   $('count').textContent = books.length ? `${books.length}` : '';
   $('facetBar').classList.toggle('on', !!facet);
   if (facet) $('facetTxt').textContent = `${FACET_LABEL[facet.type]}: ${facet.value} · ${shown.length} book${shown.length === 1 ? '' : 's'}`;
@@ -522,10 +531,12 @@ async function render() {
       <h3>${esc(b.title) || '<i>Untitled — tap to fill in</i>'}</h3>
       <div class="meta">${authorsOf(b).map(a => fct('author', a)).join(', ')}${b.published ? ' · ' + esc(b.published) : ''}</div>
       <div class="meta">${[b.category, b.subcategory].filter(Boolean).map(c => fct('category', c)).join(' › ')}</div>
+      ${b.lentTo ? `<div class="meta loan">📖 Lent to ${fct('borrower', b.lentTo)} · ${esc(loanSince(b))}</div>` : ''}
       ${b.concepts || b.tags ? `<div class="chips">${splitList(b.concepts).slice(0, 3).map(t => fct('concept', t, null, 'chip concept')).join('')}${splitList(b.tags).slice(0, 4).map(t => fct('tag', t, null, 'chip')).join('')}</div>` : ''}
     </div>`).join('')
     : `<div class="empty">${books.length ? 'No matches.' : 'No books yet.<br>Tap <b>Scan books</b> and point your camera at a barcode.'}</div>`;
 }
+$('loanBtn').onclick = () => setFacet({ type: 'loan', value: 'out on loan' });
 $('facetClear').onclick = () => { facet = null; render(); };
 $('filter').addEventListener('input', render);
 
@@ -559,6 +570,62 @@ function enrichLater(isbn) {
       if (applyAI(b, await askAI(b)).length) { await saveBook(b); render(); }
     } catch (_) { /* background step: stay quiet; the "Suggest with AI" button shows errors */ }
   });
+}
+
+// ---------- lending ----------
+const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+function loanSince(b) {
+  const d = new Date(b.lentOn + 'T00:00:00');
+  if (isNaN(d)) return 'date not recorded';
+  const n = Math.max(0, Math.floor((Date.now() - d) / 864e5));
+  const when = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+  return `since ${when}${n ? ` (${n} day${n === 1 ? '' : 's'})` : ' (today)'}`;
+}
+const savedBorrowers = () => { try { return JSON.parse(localStorage.getItem('borrowers') || '[]'); } catch (_) { return []; } };
+let onSheetClose = null;   // called if the sheet is dismissed rather than completed
+
+// Bottom sheet: lend this book (who, and when) or, if it is already out, mark it returned. Resolves true if the loan changed.
+async function askLoan(b) {
+  const people = [...new Set([...(await allBooks()).map(x => x.lentTo), ...savedBorrowers()].filter(Boolean))];
+  return new Promise(res => {
+    $('sheet').innerHTML = `<div class="grab"></div><h3 style="margin:4px 0 0">${esc(b.title) || 'Untitled'}</h3><div class="meta" style="color:var(--muted)">${esc(b.author)}</div>` + (b.lentTo
+      ? `<p class="loan">📖 Lent to ${esc(b.lentTo)} · ${esc(loanSince(b))}</p>
+         <div class="btns"><button class="ghost grow" id="lNo">Leave it</button><button class="grow" id="lRet">Mark returned</button></div>`
+      : `<label>Lend to</label><input id="lWho" list="lPeople" autocapitalize="words" autocomplete="off" placeholder="Name">
+         <datalist id="lPeople">${people.map(p => `<option value="${esc(p)}">`).join('')}</datalist>
+         <label>Date lent</label><input id="lOn" type="date" value="${today()}">
+         <div class="btns"><button class="ghost grow" id="lNo">Cancel</button><button class="grow" id="lGo">Lend</button></div>`);
+    onSheetClose = () => res(false);
+    $('sheetBg').classList.add('on');
+    const done = async msg => { onSheetClose = null; await saveBook(b); closeSheet(); toast(msg); res(true); };
+    $('lNo').onclick = closeSheet;
+    if (b.lentTo) $('lRet').onclick = () => {
+      const who = b.lentTo;
+      b.loanLog = [b.loanLog, `${who}: ${b.lentOn || '?'} → ${today()}`].filter(Boolean).join(' | ');
+      b.lentTo = ''; b.lentOn = '';
+      done(`Returned: ${b.title || b.isbn} (from ${who})`);
+    };
+    else {
+      $('lWho').focus();
+      $('lGo').onclick = () => {
+        const who = $('lWho').value.trim();
+        if (!who) { $('lWho').style.borderColor = 'var(--danger)'; return $('lWho').focus(); }
+        b.lentTo = who; b.lentOn = $('lOn').value || today();
+        try { localStorage.setItem('borrowers', JSON.stringify([...new Set([who, ...people])].slice(0, 50))); } catch (_) {}
+        done(`Lent: ${b.title || b.isbn} to ${who}`);
+      };
+    }
+  });
+}
+
+// Scanner in lend mode: a book not yet in the library is looked up and added first, so you can lend straight from the shelf.
+async function lendFlow(code) {
+  let b = await getBook(code);
+  if (!b) { await handleIsbn(code); b = await getBook(code); }
+  if (!b) return false;
+  const changed = await askLoan(b);
+  render();
+  return changed;
 }
 
 // ---------- fill in incomplete books ----------
@@ -625,12 +692,16 @@ async function openSheet(isbn) {
       : `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
     <p style="margin:14px 0 0"><a href="${esc(b.link || worldcatUrl(b.isbn))}" target="_blank" rel="noopener">Open catalogue record ↗</a>
     &nbsp;·&nbsp; <a href="${esc(b.amazon)}" target="_blank" rel="noopener">Amazon ↗</a></p>
+    ${b.lentTo ? `<p class="loan" style="margin:12px 0 0">📖 Lent to ${esc(b.lentTo)} · ${esc(loanSince(b))}</p>` : ''}
+    <button class="ghost" id="lendB" style="width:100%;margin-top:10px">${b.lentTo ? 'Mark returned' : 'Lend this book'}</button>
     <label>Explore from this book</label>
     <div class="chips" style="margin-top:0">${[...authorsOf(b).map(a => fct('author', a, null, 'chip')), ...[b.category, b.subcategory].filter(Boolean).map(c => fct('category', c, null, 'chip')),
       ...splitList(b.concepts).map(t => fct('concept', t, null, 'chip concept')), ...splitList(b.tags).map(t => fct('tag', t, null, 'chip'))].join('') || '<span class="meta">Nothing to explore yet — add tags or concepts.</span>'}</div>
     <label>Related books</label>
     <div id="related" class="rel"><span class="meta">Looking…</span></div>
     <details style="margin-top:10px"><summary class="meta" style="cursor:pointer">More details</summary>
+      <label>Lent to</label><input data-f="lentTo" value="${esc(b.lentTo)}">
+      <label>Lent on</label><input type="date" data-f="lentOn" value="${esc(b.lentOn)}">
       ${FIELDS_MORE.map(([f, l]) => `<label>${l}</label><input data-f="${f}" value="${esc(b[f])}">`).join('')}
     </details>
     <div class="meta" style="color:var(--muted);font-size:13px;margin-top:6px">ISBN ${b.isbn}</div>
@@ -643,6 +714,7 @@ async function openSheet(isbn) {
   $('sheetBg').classList.add('on');
   showRelated(b);
   $('sheet').querySelectorAll('.chips [data-facet]').forEach(el => el.onclick = () => { closeSheet(); setFacet({ type: el.dataset.facet, value: el.dataset.value }); });
+  $('lendB').onclick = async () => { closeSheet(); if (await askLoan(b)) render(); };
   $('saveB').onclick = async () => {
     $('sheet').querySelectorAll('[data-f]').forEach(el => b[el.dataset.f] = el.value.trim());
     await saveBook(b); closeSheet(); render();
@@ -683,7 +755,7 @@ async function openSheet(isbn) {
   };
   $('delB').onclick = async () => { if (confirm('Delete this book?')) { await removeBook(isbn); closeSheet(); render(); } };
 }
-const closeSheet = () => $('sheetBg').classList.remove('on');
+const closeSheet = () => { $('sheetBg').classList.remove('on'); const f = onSheetClose; onSheetClose = null; f?.(); };
 $('sheetBg').addEventListener('click', e => { if (e.target.id === 'sheetBg') closeSheet(); });
 $('list').addEventListener('click', e => {
   const f = e.target.closest('[data-facet]');
@@ -700,7 +772,7 @@ $('typeBtn').onclick = () => {
 // ---------- CSV export ----------
 $('csvBtn').onclick = async () => {
   const cols = BOOK_COLS;
-  const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Catalogue link','Amazon link','Description','Key concepts','Work ID','Author ID','Source','Added'];
+  const head = ['ISBN','Title','Author','Original publication','Main category','Sub category','Tags','Catalogue link','Amazon link','Description','Key concepts','Work ID','Author ID','Source','Added','Lent to','Lent on','Loan history'];
   const cell = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const csv = [head, ...(await allBooks()).map(b => cols.map(c => b[c]))].map(r => r.map(cell).join(',')).join('\r\n');
   const file = new File(['﻿' + csv], 'books.csv', { type: 'text/csv' });
@@ -717,15 +789,19 @@ ZXingWASM.setZXingModuleOverrides({ locateFile: f => f.endsWith('.wasm') ? 'zxin
 const READ_OPTS = { formats: ['EAN-13'], tryHarder: true, tryRotate: true, tryInvert: false, maxNumberOfSymbols: 1 };
 const isbnFrom = res => res.map(r => (r.text.match(/97[89]\d{10}/) || [])[0]).find(c => c && isbn13Valid(c));
 
-let stream = null, scanning = false, added = 0, busy = false;
+let stream = null, scanning = false, added = 0, busy = false, mode = 'add';   // mode: 'add' books, or 'lend' (lend / mark returned)
+const HINT = { add: 'Hold the barcode inside the box and keep it steady. Scans keep running — tap Done when finished.',
+               lend: 'Scan a book to lend it, or one that is out to mark it returned. Tap Done when finished.' };
+const setCount = () => $('scanCount').textContent = mode === 'lend' ? `${added} lent / returned` : `${added} added`;
 const seen = new Map();   // code -> last time handled, to ignore repeat reads of the same barcode
 
 async function onCode(code) {
   const now = Date.now();
   if (busy || now - (seen.get(code) || 0) < 6000) return;
   seen.set(code, now); busy = true; buzz(60);
-  try { if (await handleIsbn(code) === 'added') $('scanCount').textContent = `${++added} added`; }
-  finally { busy = false; }
+  try {
+    if (mode === 'lend' ? await lendFlow(code) : await handleIsbn(code) === 'added') { added++; setCount(); }
+  } finally { busy = false; seen.set(code, Date.now()); }   // restart the repeat-read timer once the sheet is closed
 }
 
 async function scanLoop(video) {
@@ -745,8 +821,8 @@ async function scanLoop(video) {
   }
 }
 
-async function startScan() {
-  added = 0; $('scanCount').textContent = '0 added';
+async function startScan(m = 'add') {
+  mode = m; added = 0; setCount(); $('scanHintTxt').textContent = HINT[m];
   $('scanner').classList.add('on');
   try {
     // ask for a high-resolution stream: the default (~640x480) leaves a book barcode too few pixels to read
@@ -782,7 +858,8 @@ $('photoIn').onchange = async e => {
   catch (err) { toast('Could not read the photo: ' + err.message, true); }
 };
 
-$('scanBtn').onclick = startScan;
+$('scanBtn').onclick = () => startScan('add');
+$('lendBtn').onclick = () => startScan('lend');
 $('scanDone').onclick = stopScan;
 
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
