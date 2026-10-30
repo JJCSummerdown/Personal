@@ -7,6 +7,7 @@ const COLUMNS = [
   ['category', 'Main category'], ['subcategory', 'Sub category'], ['tags', 'Tags'],
   ['link', 'Catalogue link'], ['amazon', 'Amazon link'], ['description', 'Description'], ['concepts', 'Key concepts'],
   ['workId', 'Work ID'], ['authorId', 'Author ID'], ['source', 'Source'], ['added', 'Added'],
+  ['lentTo', 'Lent to'], ['lentOn', 'Lent on'], ['loanLog', 'Loan history'],
 ];
 
 // returns the Books sheet and { field: 0-based column index }, creating the sheet / any missing columns
@@ -23,6 +24,7 @@ function sheet_() {
   COLUMNS.forEach(([f, h]) => idx[f] = header.indexOf(h));
   sh.getRange(1, idx.isbn + 1, sh.getMaxRows(), 1).setNumberFormat('@');          // keep ISBNs as text (no 9.78E+12)
   sh.getRange(1, idx.published + 1, sh.getMaxRows(), 1).setNumberFormat('@');
+  sh.getRange(1, idx.lentOn + 1, sh.getMaxRows(), 1).setNumberFormat('@');           // keep yyyy-mm-dd as text, not a date
   return { sh, idx, width: header.length };
 }
 const json_ = o => ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);

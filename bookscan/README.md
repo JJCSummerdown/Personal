@@ -41,3 +41,11 @@ Cost: one short request per book. At `claude-opus-5-5` rates (about $4 / $20 per
 ## Explore
 
 On the list, tap a **concept** (green), **tag** (grey), **author** or **category** (underlined) to filter to every book that shares it; the banner under the search box shows what you are filtering by and clears it. Tapping elsewhere on a card opens the book. In a book's edit screen, *Explore from this book* repeats those chips and *Related books* ranks the other books by what they share: same author (most), then shared concepts, subcategory, tags and category, with the reason shown.
+
+## Lending
+
+Tap **🤝 Lend** to open the scanner in lend mode. Scan a book and enter who has it (and the date, which defaults to today) → *Lend*. Scan a book that is already out and it offers *Mark returned*. A book not yet in your library is looked up and added first, so you can lend straight off the shelf. Names you've used before are suggested.
+
+Lent books show *Lent to … · since 12 Oct (18 days)* on their card; tap the name to see everything that person has, or the **📖 n on loan** button under the search box for all loans (longest-standing first). A book's edit screen has *Lend this book* / *Mark returned*, and *More details* lets you correct the name or date by hand. Returning a book appends to its *Loan history* (`Sam: 2026-10-01 → 2026-10-30`).
+
+Loans are stored with the book and synced as three new Sheet columns (*Lent to*, *Lent on*, *Loan history*). Paste the new `Code.gs` and redeploy as a new version to get them; until then loans stay on the phone only.
